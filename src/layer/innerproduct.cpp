@@ -13,6 +13,8 @@
 // specific language governing permissions and limitations under the License.
 
 #include "innerproduct.h"
+#include <algorithm>
+#include "layer_type.h"
 
 namespace ncnn {
 
@@ -24,208 +26,97 @@ InnerProduct::InnerProduct()
     support_inplace = false;
 }
 
-InnerProduct::~InnerProduct()
-{
-}
-
 int InnerProduct::load_param(const ParamDict& pd)
 {
     num_output = pd.get(0, 0);
     bias_term = pd.get(1, 0);
     weight_data_size = pd.get(2, 0);
+    int8_scale_term = pd.get(8, 0);
+    activation_type = pd.get(9, 0);
+    activation_params = pd.get(10, Mat());
 
     return 0;
 }
 
-#if NCNN_STDIO
-int InnerProduct::load_model(FILE* binfp)
+int InnerProduct::load_model(const ModelBin& mb)
 {
-    int nread;
-
-    union
-    {
-        struct
-        {
-            unsigned char f0;
-            unsigned char f1;
-            unsigned char f2;
-            unsigned char f3;
-        };
-        unsigned int tag;
-    } flag_struct;
-
-    nread = fread(&flag_struct, sizeof(flag_struct), 1, binfp);
-    if (nread != 1)
-    {
-        fprintf(stderr, "InnerProduct read flag_struct failed %d\n", nread);
-        return -1;
-    }
-
-    unsigned int flag = flag_struct.f0 + flag_struct.f1 + flag_struct.f2 + flag_struct.f3;
-
-    weight_data.create(weight_data_size);
+    weight_data = mb.load(weight_data_size, 0);
     if (weight_data.empty())
         return -100;
 
-    if (flag_struct.tag == 0x01306B47)
-    {
-        // half-precision weight data
-        int align_weight_data_size = alignSize(weight_data_size * sizeof(unsigned short), 4);
-        std::vector<unsigned short> float16_weights;
-        float16_weights.resize(align_weight_data_size);
-        nread = fread(float16_weights.data(), align_weight_data_size, 1, binfp);
-        if (nread != 1)
-        {
-            fprintf(stderr, "InnerProduct read float16_weights failed %d\n", nread);
-            return -1;
-        }
-
-        weight_data = Mat::from_float16(float16_weights.data(), weight_data_size);
-        if (weight_data.empty())
-            return -100;
-    }
-    else if (flag != 0)
-    {
-        // quantized weight data
-        float quantization_value[256];
-        nread = fread(quantization_value, 256 * sizeof(float), 1, binfp);
-        if (nread != 1)
-        {
-            fprintf(stderr, "InnerProduct read quantization_value failed %d\n", nread);
-            return -1;
-        }
-
-        int align_weight_data_size = alignSize(weight_data_size * sizeof(unsigned char), 4);
-        std::vector<unsigned char> index_array;
-        index_array.resize(align_weight_data_size);
-        nread = fread(index_array.data(), align_weight_data_size, 1, binfp);
-        if (nread != 1)
-        {
-            fprintf(stderr, "InnerProduct read index_array failed %d\n", nread);
-            return -1;
-        }
-
-        float* weight_data_ptr = weight_data;
-        for (int i = 0; i < weight_data_size; i++)
-        {
-            weight_data_ptr[i] = quantization_value[ index_array[i] ];
-        }
-    }
-    else if (flag_struct.f0 == 0)
-    {
-        // raw weight data
-        nread = fread(weight_data, weight_data_size * sizeof(float), 1, binfp);
-        if (nread != 1)
-        {
-            fprintf(stderr, "InnerProduct read weight_data failed %d\n", nread);
-            return -1;
-        }
-    }
-
     if (bias_term)
     {
-        bias_data.create(num_output);
+        bias_data = mb.load(num_output, 1);
         if (bias_data.empty())
             return -100;
-        nread = fread(bias_data, num_output * sizeof(float), 1, binfp);
-        if (nread != 1)
-        {
-            fprintf(stderr, "InnerProduct read bias_data failed %d\n", nread);
-            return -1;
-        }
     }
 
-    return 0;
-}
-#endif // NCNN_STDIO
-
-int InnerProduct::load_model(const unsigned char*& mem)
-{
-    union
+    if (int8_scale_term)
     {
-        struct
-        {
-            unsigned char f0;
-            unsigned char f1;
-            unsigned char f2;
-            unsigned char f3;
-        };
-        unsigned int tag;
-    } flag_struct;
-
-    memcpy(&flag_struct, mem, sizeof(flag_struct));
-    mem += sizeof(flag_struct);
-
-    unsigned int flag = flag_struct.f0 + flag_struct.f1 + flag_struct.f2 + flag_struct.f3;
-
-    if (flag_struct.tag == 0x01306B47)
-    {
-        // half-precision weight data
-        weight_data = Mat::from_float16((unsigned short*)mem, weight_data_size);
-        mem += alignSize(weight_data_size * sizeof(unsigned short), 4);
-        if (weight_data.empty())
-            return -100;
-    }
-    else if (flag != 0)
-    {
-        // quantized weight data
-        const float* quantization_value = (const float*)mem;
-        mem += 256 * sizeof(float);
-
-        const unsigned char* index_array = (const unsigned char*)mem;
-        mem += alignSize(weight_data_size * sizeof(unsigned char), 4);
-
-        weight_data.create(weight_data_size);
-        if (weight_data.empty())
-            return -100;
-        float* weight_data_ptr = weight_data;
-        for (int i = 0; i < weight_data_size; i++)
-        {
-            weight_data_ptr[i] = quantization_value[ index_array[i] ];
-        }
-    }
-    else if (flag_struct.f0 == 0)
-    {
-        // raw weight data
-        weight_data = Mat(weight_data_size, (float*)mem);
-        mem += weight_data_size * sizeof(float);
-    }
-
-    if (bias_term)
-    {
-        bias_data = Mat(num_output, (float*)mem);
-        mem += num_output * sizeof(float);
+        weight_data_int8_scales = mb.load(num_output, 1);
+        bottom_blob_int8_scale = mb.load(1, 1)[0];
     }
 
     return 0;
 }
 
-int InnerProduct::forward(const Mat& bottom_blob, Mat& top_blob) const
+int InnerProduct::create_pipeline(const Option& opt)
 {
+    // runtime quantize the weight data
+    if (opt.use_int8_inference && weight_data.elemsize == (size_t)4u && int8_scale_term)
+    {
+        Mat int8_weight_data(weight_data_size, (size_t)1u);
+        if (int8_weight_data.empty())
+            return -100;
+
+        const int weight_data_size_output = weight_data_size / num_output;
+
+        for (int p=0; p<num_output; p++)
+        {
+            Option opt_q = opt;
+            opt_q.blob_allocator = int8_weight_data.allocator;
+
+            const Mat weight_data_n = weight_data.range(weight_data_size_output * p, weight_data_size_output);
+            Mat int8_weight_data_n = int8_weight_data.range(weight_data_size_output * p, weight_data_size_output);
+            quantize_float32_to_int8(weight_data_n, int8_weight_data_n, weight_data_int8_scales[p], opt_q);
+        }
+
+        weight_data = int8_weight_data;
+    }
+
+    return 0;
+}
+
+int InnerProduct::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+{
+    if (opt.use_int8_inference && weight_data.elemsize == (size_t)1u)
+    {
+        return forward_int8(bottom_blob, top_blob, opt);
+    }
+
     int w = bottom_blob.w;
     int h = bottom_blob.h;
     int channels = bottom_blob.c;
+    size_t elemsize = bottom_blob.elemsize;
     int size = w * h;
 
-    top_blob.create(1, 1, num_output);
+    top_blob.create(num_output, elemsize, opt.blob_allocator);
     if (top_blob.empty())
         return -100;
 
     // num_output
-    const float* weight_data_ptr = weight_data;
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(opt.num_threads)
     for (int p=0; p<num_output; p++)
     {
-        float* outptr = top_blob.channel(p);
         float sum = 0.f;
 
         if (bias_term)
-            sum = bias_data.data[p];
+            sum = bias_data[p];
 
         // channels
         for (int q=0; q<channels; q++)
         {
-            const float* w = weight_data_ptr + size * channels * p + size * q;
+            const float* w = (const float*)weight_data + size * channels * p + size * q;
             const float* m = bottom_blob.channel(q);
 
             for (int i = 0; i < size; i++)
@@ -234,7 +125,94 @@ int InnerProduct::forward(const Mat& bottom_blob, Mat& top_blob) const
             }
         }
 
-        outptr[0] = sum;
+        if (activation_type == 1)
+        {
+            sum = std::max(sum, 0.f);
+        }
+        else if (activation_type == 2)
+        {
+            float slope = activation_params[0];
+            sum = sum > 0.f ? sum : sum * slope;
+        }
+        else if (activation_type == 3)
+        {
+            float min = activation_params[0];
+            float max = activation_params[1];
+            if (sum < min)
+                sum = min;
+            if (sum > max)
+                sum = max;
+        }
+        else if (activation_type == 4)
+        {
+            sum = static_cast<float>(1.f / (1.f + exp(-sum)));
+        }
+
+        top_blob[p] = sum;
+    }
+
+    return 0;
+}
+
+int InnerProduct::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+{
+    int w = bottom_blob.w;
+    int h = bottom_blob.h;
+    int channels = bottom_blob.c;
+    size_t elemsize = bottom_blob.elemsize;
+    int size = w * h;
+
+    Mat bottom_blob_tm = bottom_blob;
+    if (elemsize != 1)
+    {
+        Option opt_g = opt;
+        opt_g.blob_allocator = opt.workspace_allocator;
+
+        quantize_float32_to_int8(bottom_blob, bottom_blob_tm, bottom_blob_int8_scale, opt_g);
+    }
+
+    top_blob.create(num_output, elemsize, opt.blob_allocator);
+    if (top_blob.empty())
+        return -100;
+
+    // num_output
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int p=0; p<num_output; p++)
+    {
+        float* outptr = top_blob;
+
+        int sum = 0;
+
+        // channels
+        for (int q=0; q<channels; q++)
+        {
+            const signed char* w = (const signed char*)weight_data + size * channels * p + size * q;
+            const signed char* m = bottom_blob_tm.channel(q);
+
+            for (int i = 0; i < size; i++)
+            {
+                sum += m[i] * w[i];
+            }
+        }
+
+        // dequantize and relu
+        float scale_in;
+        if (weight_data_int8_scales[p] == 0)
+            scale_in = 0;
+        else
+            scale_in = 1.f / (bottom_blob_int8_scale * weight_data_int8_scales[p]);
+
+        float sumfp32 = sum * scale_in;
+
+        if (bias_term)
+            sumfp32 += bias_data[p];
+
+        if (activation_type == 1)
+        {
+            sumfp32 = std::max(sumfp32, 0.f);
+        }
+
+        outptr[p] = sumfp32;
     }
 
     return 0;

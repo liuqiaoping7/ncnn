@@ -26,9 +26,7 @@ public:
 
     virtual int load_param(const ParamDict& pd);
 
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
-
-    virtual int forward_inplace(Mat& bottom_top_blob) const;
+    virtual int forward_inplace(Mat& bottom_top_blob, const Option& opt) const;
 
     enum {
         Operation_ABS   = 0,
@@ -46,7 +44,8 @@ public:
         Operation_ASIN  = 12,
         Operation_ACOS  = 13,
         Operation_ATAN  = 14,
-        Operation_RECIPROCAL = 15
+        Operation_RECIPROCAL = 15,
+        Operation_TANH = 16
     };
 
 public:

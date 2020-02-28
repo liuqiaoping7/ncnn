@@ -18,9 +18,18 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
-#include "mat.h"
-#include "paramdict.h"
+#include <math.h>
 #include "platform.h"
+#include "mat.h"
+#include "modelbin.h"
+#include "option.h"
+#include "paramdict.h"
+
+#if NCNN_VULKAN
+#include <vulkan/vulkan.h>
+#include "command.h"
+#include "pipeline.h"
+#endif // NCNN_VULKAN
 
 namespace ncnn {
 
@@ -36,16 +45,17 @@ public:
     // return 0 if success
     virtual int load_param(const ParamDict& pd);
 
-#if NCNN_STDIO
-    // load layer specific weight data from model file
+    // load layer specific weight data from model binary
     // return 0 if success
-    virtual int load_model(FILE* binfp);
-#endif // NCNN_STDIO
+    virtual int load_model(const ModelBin& mb);
 
-    // load layer specific weight data from memory
-    // memory pointer is 32-bit aligned
+    // layer implementation specific setup
     // return 0 if success
-    virtual int load_model(const unsigned char*& mem);
+    virtual int create_pipeline(const Option& opt);
+
+    // layer implementation specific clean
+    // return 0 if success
+    virtual int destroy_pipeline(const Option& opt);
 
 public:
     // one input and one output blob
@@ -54,18 +64,47 @@ public:
     // support inplace inference
     bool support_inplace;
 
+    // support vulkan compute
+    bool support_vulkan;
+
+    // accept input blob with packed storage
+    bool support_packing;
+
 public:
     // implement inference
     // return 0 if success
-    virtual int forward(const std::vector<Mat>& bottom_blobs, std::vector<Mat>& top_blobs) const;
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    virtual int forward(const std::vector<Mat>& bottom_blobs, std::vector<Mat>& top_blobs, const Option& opt) const;
+    virtual int forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
 
     // implement inplace inference
     // return 0 if success
-    virtual int forward_inplace(std::vector<Mat>& bottom_top_blobs) const;
-    virtual int forward_inplace(Mat& bottom_top_blob) const;
+    virtual int forward_inplace(std::vector<Mat>& bottom_top_blobs, const Option& opt) const;
+    virtual int forward_inplace(Mat& bottom_top_blob, const Option& opt) const;
+
+#if NCNN_VULKAN
+public:
+    // upload weight blob from host to device
+    virtual int upload_model(VkTransfer& cmd, const Option& opt);
 
 public:
+    // implement inference
+    // return 0 if success
+    virtual int forward(const std::vector<VkMat>& bottom_blobs, std::vector<VkMat>& top_blobs, VkCompute& cmd, const Option& opt) const;
+    virtual int forward(const VkMat& bottom_blob, VkMat& top_blob, VkCompute& cmd, const Option& opt) const;
+
+    // implement inplace inference
+    // return 0 if success
+    virtual int forward_inplace(std::vector<VkMat>& bottom_top_blobs, VkCompute& cmd, const Option& opt) const;
+    virtual int forward_inplace(VkMat& bottom_top_blob, VkCompute& cmd, const Option& opt) const;
+
+public:
+    // assigned immediately after creating this layer
+    const VulkanDevice* vkdev;
+#endif // NCNN_VULKAN
+
+public:
+    // layer type index
+    int typeindex;
 #if NCNN_STRING
     // layer type name
     std::string type;
@@ -76,6 +115,9 @@ public:
     std::vector<int> bottoms;
     // blob index which this layer produces as output
     std::vector<int> tops;
+    // shape hint
+    std::vector<Mat> bottom_shapes;
+    std::vector<Mat> top_shapes;
 };
 
 // layer factory function
@@ -94,6 +136,8 @@ struct layer_registry_entry
 #if NCNN_STRING
 // get layer type from type name
 int layer_to_index(const char* type);
+// create layer from type name
+Layer* create_layer(const char* type);
 #endif // NCNN_STRING
 // create layer from layer type
 Layer* create_layer(int index);

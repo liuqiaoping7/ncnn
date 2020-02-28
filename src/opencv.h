@@ -23,6 +23,13 @@
 #include <string>
 #include "mat.h"
 
+#if defined(_MSC_VER) || defined(__GNUC__)
+#pragma push_macro("min")
+#pragma push_macro("max")
+#undef min
+#undef max
+#endif
+
 // minimal opencv style data structure implementation
 namespace cv
 {
@@ -255,9 +262,16 @@ struct Mat
 Mat imread(const std::string& path, int flags);
 void imwrite(const std::string& path, const Mat& m);
 
+#if NCNN_PIXEL
 void resize(const Mat& src, Mat& dst, const Size& size, float sw = 0.f, float sh = 0.f, int flags = 0);
+#endif // NCNN_PIXEL
 
 } // namespace cv
+
+#if defined(_MSC_VER) || defined(__GNUC__)
+#pragma pop_macro("min")
+#pragma pop_macro("max")
+#endif
 
 #endif // NCNN_OPENCV
 

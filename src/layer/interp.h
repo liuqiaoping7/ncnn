@@ -23,19 +23,18 @@ class Interp : public Layer
 {
 public:
     Interp();
-    virtual ~Interp();
 
     virtual int load_param(const ParamDict& pd);
 
-    virtual int forward(const Mat &bottom_blob, Mat &top_blob) const;
+    virtual int forward(const Mat &bottom_blob, Mat &top_blob, const Option& opt) const;
 
 public:
     // param
+    int resize_type;//1=nearest  2=bilinear  3=bicubic
     float width_scale;
     float height_scale;
     int output_width;
     int output_height;
-    int resize_type;//1:near 2: bilinear
 };
 
 } // namespace ncnn

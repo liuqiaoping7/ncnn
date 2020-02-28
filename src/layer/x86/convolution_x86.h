@@ -19,10 +19,34 @@
 
 namespace ncnn {
 
-class Convolution_x86 : public Convolution
+class Convolution_x86 : virtual public Convolution
 {
 public:
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    Convolution_x86();
+
+    virtual int create_pipeline(const Option& opt);
+    virtual int destroy_pipeline(const Option& opt);
+
+    virtual int forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
+
+protected:
+    int create_pipeline_int8_x86(const Option& opt);
+    int forward_int8_x86(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
+    int forwardDilation_x86(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
+
+public:
+    Layer* activation;
+    bool use_winograd3x3;
+    Mat weight_3x3_winograd23_data;
+    Mat weight_sgemm_data;
+    std::vector<Mat> weight_3x3_winograd43_data;
+
+    // forwardDilation
+    Layer* convolution_dilation1;
+
+    // int8
+    bool use_winograd3x3_int8;
+    Mat weight_3x3_winograd23_data_int8;
 };
 
 } // namespace ncnn

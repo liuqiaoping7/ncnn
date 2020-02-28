@@ -18,11 +18,21 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
+#include "platform.h"
 #include "net.h"
+#if NCNN_VULKAN
+#include "gpu.h"
+#endif // NCNN_VULKAN
 
 static int detect_squeezenet(const cv::Mat& bgr, std::vector<float>& cls_scores)
 {
     ncnn::Net squeezenet;
+
+#if NCNN_VULKAN
+    squeezenet.opt.use_vulkan_compute = true;
+#endif // NCNN_VULKAN
+
+    // the ncnn model https://github.com/nihui/ncnn-assets/tree/master/models
     squeezenet.load_param("squeezenet_v1.1.param");
     squeezenet.load_model("squeezenet_v1.1.bin");
 
@@ -32,18 +42,16 @@ static int detect_squeezenet(const cv::Mat& bgr, std::vector<float>& cls_scores)
     in.substract_mean_normalize(mean_vals, 0);
 
     ncnn::Extractor ex = squeezenet.create_extractor();
-    ex.set_light_mode(true);
 
     ex.input("data", in);
 
     ncnn::Mat out;
     ex.extract("prob", out);
 
-    cls_scores.resize(out.c);
-    for (int j=0; j<out.c; j++)
+    cls_scores.resize(out.w);
+    for (int j=0; j<out.w; j++)
     {
-        const float* prob = out.data + out.cstep * j;
-        cls_scores[j] = prob[0];
+        cls_scores[j] = out[j];
     }
 
     return 0;
@@ -76,20 +84,33 @@ static int print_topk(const std::vector<float>& cls_scores, int topk)
 
 int main(int argc, char** argv)
 {
+    if (argc != 2)
+    {
+        fprintf(stderr, "Usage: %s [imagepath]\n", argv[0]);
+        return -1;
+    }
+
     const char* imagepath = argv[1];
 
-    cv::Mat m = cv::imread(imagepath, CV_LOAD_IMAGE_COLOR);
+    cv::Mat m = cv::imread(imagepath, 1);
     if (m.empty())
     {
         fprintf(stderr, "cv::imread %s failed\n", imagepath);
         return -1;
     }
 
+#if NCNN_VULKAN
+    ncnn::create_gpu_instance();
+#endif // NCNN_VULKAN
+
     std::vector<float> cls_scores;
     detect_squeezenet(m, cls_scores);
+
+#if NCNN_VULKAN
+    ncnn::destroy_gpu_instance();
+#endif // NCNN_VULKAN
 
     print_topk(cls_scores, 3);
 
     return 0;
 }
-

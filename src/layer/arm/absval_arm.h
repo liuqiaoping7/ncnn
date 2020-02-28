@@ -19,14 +19,12 @@
 
 namespace ncnn {
 
-class AbsVal_arm : public AbsVal
+class AbsVal_arm : virtual public AbsVal
 {
 public:
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    AbsVal_arm();
 
-    virtual int forward_inplace(Mat& bottom_top_blob) const;
-
-public:
+    virtual int forward_inplace(Mat& bottom_top_blob, const Option& opt) const;
 };
 
 } // namespace ncnn

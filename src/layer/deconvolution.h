@@ -23,27 +23,37 @@ class Deconvolution : public Layer
 {
 public:
     Deconvolution();
-    virtual ~Deconvolution();
 
     virtual int load_param(const ParamDict& pd);
 
-#if NCNN_STDIO
-    virtual int load_model(FILE* binfp);
-#endif // NCNN_STDIO
-    virtual int load_model(const unsigned char*& mem);
+    virtual int load_model(const ModelBin& mb);
 
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    virtual int forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
 
 public:
     // param
     int num_output;
-    int kernel_size;
-    int dilation;
-    int stride;
-    int pad;
+    int kernel_w;
+    int kernel_h;
+    int dilation_w;
+    int dilation_h;
+    int stride_w;
+    int stride_h;
+    int pad_left;
+    int pad_right;
+    int pad_top;
+    int pad_bottom;
+    int output_pad_right;
+    int output_pad_bottom;
+    int output_w;
+    int output_h;
     int bias_term;
 
     int weight_data_size;
+
+    // 0=none 1=relu 2=leakyrelu 3=clip 4=sigmoid
+    int activation_type;
+    Mat activation_params;
 
     // model
     Mat weight_data;

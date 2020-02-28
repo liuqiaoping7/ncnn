@@ -25,67 +25,55 @@ namespace ncnn {
 
 DEFINE_LAYER_CREATOR(Sigmoid_arm)
 
-int Sigmoid_arm::forward(const Mat& bottom_blob, Mat& top_blob) const
+Sigmoid_arm::Sigmoid_arm()
 {
-    int w = bottom_blob.w;
-    int h = bottom_blob.h;
-    int channels = bottom_blob.c;
-    int size = w * h;
-
-    top_blob.create(w, h, channels);
-    if (top_blob.empty())
-        return -100;
-
-    #pragma omp parallel for
-    for (int q=0; q<channels; q++)
-    {
-        const float* ptr = bottom_blob.channel(q);
-        float* outptr = top_blob.channel(q);
-
 #if __ARM_NEON
-        int nn = size >> 2;
-        int remain = size - (nn << 2);
-#else
-        int remain = size;
+    support_packing = true;
 #endif // __ARM_NEON
-
-#if __ARM_NEON
-        float32x4_t _one = vdupq_n_f32(1.f);
-        for (; nn>0; nn--)
-        {
-            float32x4_t _p = vld1q_f32(ptr);
-            _p = vnegq_f32(_p);
-            _p = exp_ps(_p);
-            _p = vaddq_f32(_p, _one);
-            float32x4_t _outp = vrecpeq_f32(_p);
-            _outp = vmulq_f32(vrecpsq_f32(_p, _outp), _outp);
-//             _outp = vmulq_f32(vrecpsq_f32(_p, _outp), _outp);
-            vst1q_f32(outptr, _outp);
-
-            ptr += 4;
-            outptr += 4;
-        }
-#endif // __ARM_NEON
-        for (; remain>0; remain--)
-        {
-            *outptr = 1.f / (1.f + exp(-*ptr));
-
-            ptr++;
-            outptr++;
-        }
-    }
-
-    return 0;
 }
 
-int Sigmoid_arm::forward_inplace(Mat& bottom_top_blob) const
+int Sigmoid_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
 {
     int w = bottom_top_blob.w;
     int h = bottom_top_blob.h;
     int channels = bottom_top_blob.c;
     int size = w * h;
+    int elempack = bottom_top_blob.elempack;
 
-    #pragma omp parallel for
+#if __ARM_NEON
+    if (opt.use_packing_layout)
+    {
+
+    if (elempack == 4)
+    {
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int q=0; q<channels; q++)
+        {
+            float* ptr = bottom_top_blob.channel(q);
+
+            float32x4_t _one = vdupq_n_f32(1.f);
+            for (int i=0; i<size; i++)
+            {
+                float32x4_t _p = vld1q_f32(ptr);
+                _p = vnegq_f32(_p);
+                _p = exp_ps(_p);
+                _p = vaddq_f32(_p, _one);
+                float32x4_t _outp = vrecpeq_f32(_p);
+                _outp = vmulq_f32(vrecpsq_f32(_p, _outp), _outp);
+//                 _outp = vmulq_f32(vrecpsq_f32(_p, _outp), _outp);
+                vst1q_f32(ptr, _outp);
+
+                ptr += 4;
+            }
+        }
+
+        return 0;
+    }
+
+    } // opt.use_packing_layout
+#endif // __ARM_NEON
+
+    #pragma omp parallel for num_threads(opt.num_threads)
     for (int q=0; q<channels; q++)
     {
         float* ptr = bottom_top_blob.channel(q);

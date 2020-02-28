@@ -19,12 +19,12 @@
 
 namespace ncnn {
 
-class Scale_arm : public Scale
+class Scale_arm : virtual public Scale
 {
 public:
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    Scale_arm();
 
-    virtual int forward_inplace(Mat& bottom_top_blob) const;
+    virtual int forward_inplace(std::vector<Mat>& bottom_top_blobs, const Option& opt) const;
 };
 
 } // namespace ncnn

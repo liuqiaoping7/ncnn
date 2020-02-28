@@ -19,21 +19,48 @@
 
 namespace ncnn {
 
-class Convolution_arm : public Convolution
+class Convolution_arm : virtual public Convolution
 {
 public:
-    virtual int load_param(const ParamDict& pd);
+    Convolution_arm();
 
-#if NCNN_STDIO
-    virtual int load_model(FILE* binfp);
-#endif // NCNN_STDIO
-    virtual int load_model(const unsigned char*& mem);
+    virtual int create_pipeline(const Option& opt);
+    virtual int destroy_pipeline(const Option& opt);
 
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    virtual int forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
+
+protected:
+    int create_pipeline_int8_arm(const Option& opt);
+    int forward_int8_arm(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
+    int forwardDilation_arm(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const;
 
 public:
+    Layer* activation;
     bool use_winograd3x3;
+    bool use_sgemm1x1;
     Mat weight_3x3_winograd64_data;
+    Mat weight_1x1_sgemm_data;
+    Mat weight_3x3s2_data;
+    Mat weight_sgemm_data;
+
+    // forwardDilation
+    Layer* convolution_dilation1;
+
+    // pack4
+    Mat weight_data_pack4;
+    Mat weight_data_pack1to4;
+    Mat weight_data_pack4to1;
+
+    Mat weight_3x3_winograd64_data_pack4;
+    Mat weight_1x1_sgemm_data_pack4;
+
+    // int8
+    bool use_winograd3x3_int8;
+    bool use_sgemm1x1_int8;
+    Mat weight_3x3s2_data_int8;
+    Mat weight_1x1s1_sgemm_data_int8;
+    Mat weight_sgemm_data_int8;
+    std::vector<Mat> weight_3x3_winograd23_data_int8;
 };
 
 } // namespace ncnn

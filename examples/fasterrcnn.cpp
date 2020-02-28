@@ -4,7 +4,11 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
+#include "platform.h"
 #include "net.h"
+#if NCNN_VULKAN
+#include "gpu.h"
+#endif // NCNN_VULKAN
 
 struct Object
 {
@@ -102,11 +106,16 @@ static int detect_fasterrcnn(const cv::Mat& bgr, std::vector<Object>& objects)
 {
     ncnn::Net fasterrcnn;
 
+#if NCNN_VULKAN
+    fasterrcnn.opt.use_vulkan_compute = true;
+#endif // NCNN_VULKAN
+
     // original pretrained model from https://github.com/rbgirshick/py-faster-rcnn
     // py-faster-rcnn/models/pascal_voc/ZF/faster_rcnn_alt_opt/faster_rcnn_test.pt
     // https://dl.dropboxusercontent.com/s/o6ii098bu51d139/faster_rcnn_models.tgz?dl=0
     // ZF_faster_rcnn_final.caffemodel
-    fasterrcnn.load_param("ZF_faster_rcnn_final.proto");
+    // the ncnn model https://github.com/nihui/ncnn-assets/tree/master/models
+    fasterrcnn.load_param("ZF_faster_rcnn_final.param");
     fasterrcnn.load_model("ZF_faster_rcnn_final.bin");
 
     // hyper parameters taken from
@@ -142,20 +151,19 @@ static int detect_fasterrcnn(const cv::Mat& bgr, std::vector<Object>& objects)
     in.substract_mean_normalize(mean_vals, 0);
 
     ncnn::Mat im_info(3);
-    im_info.data[0] = h;
-    im_info.data[1] = w;
-    im_info.data[2] = scale;
+    im_info[0] = h;
+    im_info[1] = w;
+    im_info[2] = scale;
 
     // step1, extract feature and all rois
     ncnn::Extractor ex1 = fasterrcnn.create_extractor();
-    ex1.set_light_mode(true);
 
     ex1.input("data", in);
     ex1.input("im_info", im_info);
 
-    ncnn::Mat conv5;// feature
+    ncnn::Mat conv5_relu5;// feature
     ncnn::Mat rois;// all rois
-    ex1.extract("conv5", conv5);
+    ex1.extract("conv5_relu5", conv5_relu5);
     ex1.extract("rois", rois);
 
     // step2, extract bbox and score for each roi
@@ -163,10 +171,9 @@ static int detect_fasterrcnn(const cv::Mat& bgr, std::vector<Object>& objects)
     for (int i = 0; i < rois.c; i++)
     {
         ncnn::Extractor ex2 = fasterrcnn.create_extractor();
-        ex2.set_light_mode(true);
 
         ncnn::Mat roi = rois.channel(i);// get single roi
-        ex2.input("conv5", conv5);
+        ex2.input("conv5_relu5", conv5_relu5);
         ex2.input("rois", roi);
 
         ncnn::Mat bbox_pred;
@@ -174,7 +181,7 @@ static int detect_fasterrcnn(const cv::Mat& bgr, std::vector<Object>& objects)
         ex2.extract("bbox_pred", bbox_pred);
         ex2.extract("cls_prob", cls_prob);
 
-        int num_class = cls_prob.c;
+        int num_class = cls_prob.w;
         class_candidates.resize(num_class);
 
         // find class id with highest score
@@ -182,7 +189,7 @@ static int detect_fasterrcnn(const cv::Mat& bgr, std::vector<Object>& objects)
         float score = 0.f;
         for (int i=0; i<num_class; i++)
         {
-            float class_score = cls_prob.channel(i).data[0];
+            float class_score = cls_prob[i];
             if (class_score > score)
             {
                 label = i;
@@ -197,23 +204,19 @@ static int detect_fasterrcnn(const cv::Mat& bgr, std::vector<Object>& objects)
 //         fprintf(stderr, "%d = %f\n", label, score);
 
         // unscale to image size
-        float x1 = roi.data[0] / scale;
-        float y1 = roi.data[1] / scale;
-        float x2 = roi.data[2] / scale;
-        float y2 = roi.data[3] / scale;
+        float x1 = roi[0] / scale;
+        float y1 = roi[1] / scale;
+        float x2 = roi[2] / scale;
+        float y2 = roi[3] / scale;
 
         float pb_w = x2 - x1 + 1;
         float pb_h = y2 - y1 + 1;
 
         // apply bbox regression
-        const float* bbox_xptr = bbox_pred.channel(label * 4);
-        const float* bbox_yptr = bbox_pred.channel(label * 4 + 1);
-        const float* bbox_wptr = bbox_pred.channel(label * 4 + 2);
-        const float* bbox_hptr = bbox_pred.channel(label * 4 + 3);
-        float dx = bbox_xptr[0];
-        float dy = bbox_yptr[0];
-        float dw = bbox_wptr[0];
-        float dh = bbox_hptr[0];
+        float dx = bbox_pred[label * 4];
+        float dy = bbox_pred[label * 4 + 1];
+        float dw = bbox_pred[label * 4 + 2];
+        float dh = bbox_pred[label * 4 + 3];
 
         float cx = x1 + pb_w * 0.5f;
         float cy = y1 + pb_h * 0.5f;
@@ -307,7 +310,7 @@ static void draw_objects(const cv::Mat& bgr, const std::vector<Object>& objects)
 
         cv::rectangle(image, cv::Rect(cv::Point(x, y),
                                       cv::Size(label_size.width, label_size.height + baseLine)),
-                      cv::Scalar(255, 255, 255), CV_FILLED);
+                      cv::Scalar(255, 255, 255), -1);
 
         cv::putText(image, text, cv::Point(x, y + label_size.height),
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0));
@@ -319,17 +322,31 @@ static void draw_objects(const cv::Mat& bgr, const std::vector<Object>& objects)
 
 int main(int argc, char** argv)
 {
+    if (argc != 2)
+    {
+        fprintf(stderr, "Usage: %s [imagepath]\n", argv[0]);
+        return -1;
+    }
+
     const char* imagepath = argv[1];
 
-    cv::Mat m = cv::imread(imagepath, CV_LOAD_IMAGE_COLOR);
+    cv::Mat m = cv::imread(imagepath, 1);
     if (m.empty())
     {
         fprintf(stderr, "cv::imread %s failed\n", imagepath);
         return -1;
     }
 
+#if NCNN_VULKAN
+    ncnn::create_gpu_instance();
+#endif // NCNN_VULKAN
+
     std::vector<Object> objects;
     detect_fasterrcnn(m, objects);
+
+#if NCNN_VULKAN
+    ncnn::destroy_gpu_instance();
+#endif // NCNN_VULKAN
 
     draw_objects(m, objects);
 

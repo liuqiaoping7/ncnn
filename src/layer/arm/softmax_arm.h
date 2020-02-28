@@ -19,12 +19,12 @@
 
 namespace ncnn {
 
-class Softmax_arm : public Softmax
+class Softmax_arm : virtual public Softmax
 {
 public:
-    virtual int forward(const Mat& bottom_blob, Mat& top_blob) const;
+    Softmax_arm();
 
-    virtual int forward_inplace(Mat& bottom_top_blob) const;
+    virtual int forward_inplace(Mat& bottom_top_blob, const Option& opt) const;
 };
 
 } // namespace ncnn
