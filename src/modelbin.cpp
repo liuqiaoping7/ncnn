@@ -14,12 +14,15 @@
 
 #include "modelbin.h"
 
-#include <stdio.h>
-#include <string.h>
-#include <vector>
 #include "datareader.h"
 
+#include <string.h>
+
 namespace ncnn {
+
+ModelBin::ModelBin()
+{
+}
 
 ModelBin::~ModelBin()
 {
@@ -43,8 +46,34 @@ Mat ModelBin::load(int w, int h, int c, int type) const
     return m.reshape(w, h, c);
 }
 
-ModelBinFromDataReader::ModelBinFromDataReader(const DataReader& _dr) : dr(_dr)
+class ModelBinFromDataReaderPrivate
 {
+public:
+    ModelBinFromDataReaderPrivate(const DataReader& _dr)
+        : dr(_dr)
+    {
+    }
+    const DataReader& dr;
+};
+
+ModelBinFromDataReader::ModelBinFromDataReader(const DataReader& _dr)
+    : ModelBin(), d(new ModelBinFromDataReaderPrivate(_dr))
+{
+}
+
+ModelBinFromDataReader::~ModelBinFromDataReader()
+{
+    delete d;
+}
+
+ModelBinFromDataReader::ModelBinFromDataReader(const ModelBinFromDataReader&)
+    : d(0)
+{
+}
+
+ModelBinFromDataReader& ModelBinFromDataReader::operator=(const ModelBinFromDataReader&)
+{
+    return *this;
 }
 
 Mat ModelBinFromDataReader::load(int w, int type) const
@@ -65,10 +94,10 @@ Mat ModelBinFromDataReader::load(int w, int type) const
             unsigned int tag;
         } flag_struct;
 
-        nread = dr.read(&flag_struct, sizeof(flag_struct));
+        nread = d->dr.read(&flag_struct, sizeof(flag_struct));
         if (nread != sizeof(flag_struct))
         {
-            fprintf(stderr, "ModelBin read flag_struct failed %zd\n", nread);
+            NCNN_LOGE("ModelBin read flag_struct failed %zd", nread);
             return Mat();
         }
 
@@ -80,10 +109,10 @@ Mat ModelBinFromDataReader::load(int w, int type) const
             size_t align_data_size = alignSize(w * sizeof(unsigned short), 4);
             std::vector<unsigned short> float16_weights;
             float16_weights.resize(align_data_size);
-            nread = dr.read(float16_weights.data(), align_data_size);
+            nread = d->dr.read(float16_weights.data(), align_data_size);
             if (nread != align_data_size)
             {
-                fprintf(stderr, "ModelBin read float16_weights failed %zd\n", nread);
+                NCNN_LOGE("ModelBin read float16_weights failed %zd", nread);
                 return Mat();
             }
 
@@ -95,10 +124,10 @@ Mat ModelBinFromDataReader::load(int w, int type) const
             size_t align_data_size = alignSize(w, 4);
             std::vector<signed char> int8_weights;
             int8_weights.resize(align_data_size);
-            nread = dr.read(int8_weights.data(), align_data_size);
+            nread = d->dr.read(int8_weights.data(), align_data_size);
             if (nread != align_data_size)
             {
-                fprintf(stderr, "ModelBin read int8_weights failed %zd\n", nread);
+                NCNN_LOGE("ModelBin read int8_weights failed %zd", nread);
                 return Mat();
             }
 
@@ -117,10 +146,10 @@ Mat ModelBinFromDataReader::load(int w, int type) const
                 return m;
 
             // raw data with extra scaling
-            nread = dr.read(m, w * sizeof(float));
+            nread = d->dr.read(m, w * sizeof(float));
             if (nread != w * sizeof(float))
             {
-                fprintf(stderr, "ModelBin read weight_data failed %zd\n", nread);
+                NCNN_LOGE("ModelBin read weight_data failed %zd", nread);
                 return Mat();
             }
 
@@ -135,36 +164,36 @@ Mat ModelBinFromDataReader::load(int w, int type) const
         {
             // quantized data
             float quantization_value[256];
-            nread = dr.read(quantization_value, 256 * sizeof(float));
+            nread = d->dr.read(quantization_value, 256 * sizeof(float));
             if (nread != 256 * sizeof(float))
             {
-                fprintf(stderr, "ModelBin read quantization_value failed %zd\n", nread);
+                NCNN_LOGE("ModelBin read quantization_value failed %zd", nread);
                 return Mat();
             }
 
             size_t align_weight_data_size = alignSize(w * sizeof(unsigned char), 4);
             std::vector<unsigned char> index_array;
             index_array.resize(align_weight_data_size);
-            nread = dr.read(index_array.data(), align_weight_data_size);
+            nread = d->dr.read(index_array.data(), align_weight_data_size);
             if (nread != align_weight_data_size)
             {
-                fprintf(stderr, "ModelBin read index_array failed %zd\n", nread);
+                NCNN_LOGE("ModelBin read index_array failed %zd", nread);
                 return Mat();
             }
 
             float* ptr = m;
             for (int i = 0; i < w; i++)
             {
-                ptr[i] = quantization_value[ index_array[i] ];
+                ptr[i] = quantization_value[index_array[i]];
             }
         }
         else if (flag_struct.f0 == 0)
         {
             // raw data
-            nread = dr.read(m, w * sizeof(float));
+            nread = d->dr.read(m, w * sizeof(float));
             if (nread != w * sizeof(float))
             {
-                fprintf(stderr, "ModelBin read weight_data failed %zd\n", nread);
+                NCNN_LOGE("ModelBin read weight_data failed %zd", nread);
                 return Mat();
             }
         }
@@ -178,10 +207,10 @@ Mat ModelBinFromDataReader::load(int w, int type) const
             return m;
 
         // raw data
-        size_t nread = dr.read(m, w * sizeof(float));
+        size_t nread = d->dr.read(m, w * sizeof(float));
         if (nread != w * sizeof(float))
         {
-            fprintf(stderr, "ModelBin read weight_data failed %zd\n", nread);
+            NCNN_LOGE("ModelBin read weight_data failed %zd", nread);
             return Mat();
         }
 
@@ -189,24 +218,50 @@ Mat ModelBinFromDataReader::load(int w, int type) const
     }
     else
     {
-        fprintf(stderr, "ModelBin load type %d not implemented\n", type);
+        NCNN_LOGE("ModelBin load type %d not implemented", type);
         return Mat();
     }
 
     return Mat();
 }
 
-ModelBinFromMatArray::ModelBinFromMatArray(const Mat* _weights) : weights(_weights)
+class ModelBinFromMatArrayPrivate
 {
+public:
+    ModelBinFromMatArrayPrivate(const Mat* _weights)
+        : weights(_weights)
+    {
+    }
+    mutable const Mat* weights;
+};
+
+ModelBinFromMatArray::ModelBinFromMatArray(const Mat* _weights)
+    : ModelBin(), d(new ModelBinFromMatArrayPrivate(_weights))
+{
+}
+
+ModelBinFromMatArray::~ModelBinFromMatArray()
+{
+    delete d;
+}
+
+ModelBinFromMatArray::ModelBinFromMatArray(const ModelBinFromMatArray&)
+    : d(0)
+{
+}
+
+ModelBinFromMatArray& ModelBinFromMatArray::operator=(const ModelBinFromMatArray&)
+{
+    return *this;
 }
 
 Mat ModelBinFromMatArray::load(int /*w*/, int /*type*/) const
 {
-    if (!weights)
+    if (!d->weights)
         return Mat();
 
-    Mat m = weights[0];
-    weights++;
+    Mat m = d->weights[0];
+    d->weights++;
     return m;
 }
 

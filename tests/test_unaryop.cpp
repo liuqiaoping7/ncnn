@@ -12,15 +12,24 @@
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
-#include "testutil.h"
-
 #include "layer/unaryop.h"
+#include "testutil.h"
 
 #define OP_TYPE_MAX 17
 
-static int test_unaryop(const ncnn::Mat& _a, int op_type)
+static int op_type = 0;
+
+static int test_unaryop(const ncnn::Mat& _a)
 {
     ncnn::Mat a = _a;
+    if (op_type == 2 || op_type == 3)
+    {
+        // large dynamic range for floor ceil
+        for (int i = 0; i < a.total(); i++)
+        {
+            a[i] *= 1000;
+        }
+    }
     if (op_type == 5 || op_type == 6 || op_type == 8)
     {
         // value must be positive for sqrt rsqrt log
@@ -37,17 +46,7 @@ static int test_unaryop(const ncnn::Mat& _a, int op_type)
 
     std::vector<ncnn::Mat> weights(0);
 
-    ncnn::Option opt;
-    opt.num_threads = 1;
-    opt.use_vulkan_compute = true;
-    opt.use_int8_inference = false;
-    opt.use_fp16_packed = false;
-    opt.use_fp16_storage = false;
-    opt.use_fp16_arithmetic = false;
-    opt.use_int8_storage = false;
-    opt.use_int8_arithmetic = false;
-
-    int ret = test_layer<ncnn::UnaryOp>("UnaryOp", pd, weights, opt, a);
+    int ret = test_layer<ncnn::UnaryOp>("UnaryOp", pd, weights, a);
     if (ret != 0)
     {
         fprintf(stderr, "test_unaryop failed a.dims=%d a=(%d %d %d) op_type=%d\n", a.dims, a.w, a.h, a.c, op_type);
@@ -58,59 +57,42 @@ static int test_unaryop(const ncnn::Mat& _a, int op_type)
 
 static int test_unaryop_0()
 {
-    for (int op_type=0; op_type<OP_TYPE_MAX; op_type++)
-    {
-        int ret = 0
-            || test_unaryop(RandomMat(6, 7, 16), op_type)
-            || test_unaryop(RandomMat(3, 5, 13), op_type)
-            ;
-
-        if (ret != 0)
-            return -1;
-    }
-
-    return 0;
+    return 0
+           || test_unaryop(RandomMat(11, 7, 16))
+           || test_unaryop(RandomMat(10, 4, 12))
+           || test_unaryop(RandomMat(6, 5, 13));
 }
 
 static int test_unaryop_1()
 {
-    for (int op_type=0; op_type<OP_TYPE_MAX; op_type++)
-    {
-        int ret = 0
-            || test_unaryop(RandomMat(6, 16), op_type)
-            || test_unaryop(RandomMat(7, 15), op_type)
-            ;
-
-        if (ret != 0)
-            return -1;
-    }
-
-    return 0;
+    return 0
+           || test_unaryop(RandomMat(12, 16))
+           || test_unaryop(RandomMat(10, 12))
+           || test_unaryop(RandomMat(14, 15));
 }
 
 static int test_unaryop_2()
 {
-    for (int op_type=0; op_type<OP_TYPE_MAX; op_type++)
-    {
-        int ret = 0
-            || test_unaryop(RandomMat(128), op_type)
-            || test_unaryop(RandomMat(127), op_type)
-            ;
-
-        if (ret != 0)
-            return -1;
-    }
-
-    return 0;
+    return 0
+           || test_unaryop(RandomMat(128))
+           || test_unaryop(RandomMat(12))
+           || test_unaryop(RandomMat(15));
 }
 
 int main()
 {
     SRAND(7767517);
 
-    return 0
-        || test_unaryop_0()
-        || test_unaryop_1()
-        || test_unaryop_2()
-        ;
+    for (op_type = 0; op_type < OP_TYPE_MAX; op_type++)
+    {
+        int ret = 0
+                  || test_unaryop_0()
+                  || test_unaryop_1()
+                  || test_unaryop_2();
+
+        if (ret != 0)
+            return ret;
+    }
+
+    return 0;
 }

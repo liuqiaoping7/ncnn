@@ -1,6 +1,7 @@
-// Leo is pleased to support the open source community by making ncnn available.
+// Tencent is pleased to support the open source community by making ncnn available.
 //
 // Copyright (C) 2019 Leo <leo@nullptr.com.cn>. All rights reserved.
+// Copyright (C) 2021 THL A29 Limited, a Tencent company. All rights reserved.
 //
 // Licensed under the BSD 3-Clause License (the "License"); you may not use this file except
 // in compliance with the License. You may obtain a copy of the License at
@@ -14,13 +15,18 @@
 
 #include "absval_mips.h"
 
-#if __MIPS_MSA
+#if __mips_msa
 #include <msa.h>
-#endif // __MIPS_MSA
+#endif // __mips_msa
 
 namespace ncnn {
 
-DEFINE_LAYER_CREATOR(AbsVal_mips)
+AbsVal_mips::AbsVal_mips()
+{
+#if __mips_msa
+    support_packing = true;
+#endif
+}
 
 int AbsVal_mips::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
 {
@@ -28,21 +34,38 @@ int AbsVal_mips::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
     int h = bottom_top_blob.h;
     int channels = bottom_top_blob.c;
     int size = w * h;
+    int elempack = bottom_top_blob.elempack;
+
+#if __mips_msa
+    if (elempack == 4)
+    {
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int q = 0; q < channels; q++)
+        {
+            float* ptr = bottom_top_blob.channel(q);
+
+            for (int i = 0; i < size; i++)
+            {
+                v4u32 _p = (v4u32)__msa_ld_w(ptr, 0);
+                v4f32 _outp = (v4f32)__msa_bclri_w(_p, 31);
+                __msa_st_w((v4i32)_outp, ptr, 0);
+
+                ptr += 4;
+            }
+        }
+
+        return 0;
+    }
+#endif // __mips_msa
 
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (int q=0; q<channels; q++)
+    for (int q = 0; q < channels; q++)
     {
         float* ptr = bottom_top_blob.channel(q);
 
-#if __MIPS_MSA
-        int nn = size >> 2;
-        int remain = size - (nn << 2);
-#else
-        int remain = size;
-#endif // __MIPS_MSA
-
-#if __MIPS_MSA
-        for (; nn>0; nn--)
+        int i = 0;
+#if __mips_msa
+        for (; i + 3 < size; i += 4)
         {
             v4u32 _p = (v4u32)__msa_ld_w(ptr, 0);
             v4f32 _outp = (v4f32)__msa_bclri_w(_p, 31);
@@ -50,8 +73,8 @@ int AbsVal_mips::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
 
             ptr += 4;
         }
-#endif // __MIPS_MSA
-        for (; remain>0; remain--)
+#endif // __mips_msa
+        for (; i < size; i++)
         {
             *ptr = *ptr > 0 ? *ptr : -*ptr;
 

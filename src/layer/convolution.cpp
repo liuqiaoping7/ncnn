@@ -13,19 +13,15 @@
 // specific language governing permissions and limitations under the License.
 
 #include "convolution.h"
-#include <algorithm>
+
 #include "layer_type.h"
 
 namespace ncnn {
-
-DEFINE_LAYER_CREATOR(Convolution)
 
 Convolution::Convolution()
 {
     one_blob_only = true;
     support_inplace = false;
-
-    use_int8_requantize = false;
 }
 
 int Convolution::load_param(const ParamDict& pd)
@@ -49,6 +45,16 @@ int Convolution::load_param(const ParamDict& pd)
     activation_params = pd.get(10, Mat());
     impl_type = pd.get(17, 0);
 
+    if (int8_scale_term)
+    {
+#if NCNN_INT8
+        support_int8_storage = true;
+#else
+        NCNN_LOGE("please build ncnn with NCNN_INT8 enabled for int8 inference");
+        return -1;
+#endif
+    }
+
     return 0;
 }
 
@@ -65,38 +71,45 @@ int Convolution::load_model(const ModelBin& mb)
             return -100;
     }
 
+#if NCNN_INT8
     if (int8_scale_term)
     {
         weight_data_int8_scales = mb.load(num_output, 1);
-        bottom_blob_int8_scale = mb.load(1, 1)[0];
+        bottom_blob_int8_scales = mb.load(1, 1);
     }
+
+    if (int8_scale_term > 100)
+    {
+        top_blob_int8_scales = mb.load(1, 1);
+    }
+#endif // NCNN_INT8
 
     return 0;
 }
 
 int Convolution::create_pipeline(const Option& opt)
 {
+#if NCNN_INT8
     // runtime quantize the weight data
     if (opt.use_int8_inference && weight_data.elemsize == (size_t)4u && int8_scale_term)
     {
-        Mat int8_weight_data(weight_data_size, (size_t)1u);
-        if (int8_weight_data.empty())
+        const int maxk = kernel_w * kernel_h;
+        const int num_input = weight_data_size / num_output / maxk;
+
+        Mat weight_data_r2 = weight_data.reshape(maxk, num_input, num_output);
+
+        Mat weight_data_int8;
+
+        Option opt_q = opt;
+        opt_q.blob_allocator = weight_data.allocator;
+        opt_q.use_packing_layout = false;
+        quantize_to_int8(weight_data_r2, weight_data_int8, weight_data_int8_scales, opt_q);
+        if (weight_data_int8.empty())
             return -100;
 
-        const int weight_data_size_output = weight_data_size / num_output;
-
-        for (int p=0; p<num_output; p++)
-        {
-            Option opt_q = opt;
-            opt_q.blob_allocator = int8_weight_data.allocator;
-
-            const Mat weight_data_n = weight_data.range(weight_data_size_output * p, weight_data_size_output);
-            Mat int8_weight_data_n = int8_weight_data.range(weight_data_size_output * p, weight_data_size_output);
-            quantize_float32_to_int8(weight_data_n, int8_weight_data_n, weight_data_int8_scales[p], opt_q);
-        }
-
-        weight_data = int8_weight_data;
+        weight_data = weight_data_int8.reshape(weight_data_size);
     }
+#endif // NCNN_INT8
 
     return 0;
 }
@@ -106,16 +119,18 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
     // convolv with NxN kernel
     // value = value + bias
 
+#if NCNN_INT8
     if (opt.use_int8_inference && weight_data.elemsize == (size_t)1u)
     {
         return forward_int8(bottom_blob, top_blob, opt);
     }
+#endif
 
     // flattened blob, implement as InnerProduct
     if (bottom_blob.dims == 1 && kernel_w == 1 && kernel_h == 1)
     {
         int num_input = weight_data_size / num_output;
-        if (bottom_blob.w == num_input)
+        if (bottom_blob.w * bottom_blob.elempack == num_input)
         {
             // call InnerProduct
             ncnn::Layer* op = ncnn::create_layer(ncnn::LayerType::InnerProduct);
@@ -126,6 +141,8 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
             pd.set(1, bias_term);
             pd.set(2, weight_data_size);
             pd.set(8, int8_scale_term);
+            pd.set(9, activation_type);
+            pd.set(10, activation_params);
 
             op->load_param(pd);
 
@@ -134,11 +151,13 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
             weights[0] = weight_data;
             weights[1] = bias_data;
 
+#if NCNN_INT8
             if (int8_scale_term)
             {
                 weights[2] = weight_data_int8_scales;
-                weights[3] = Mat(1, (size_t)4u, (void*)&bottom_blob_int8_scale);
+                weights[3] = bottom_blob_int8_scales;
             }
+#endif
 
             op->load_model(ModelBinFromMatArray(weights));
 
@@ -146,6 +165,8 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
 
             // forward
             op->forward(bottom_blob, top_blob, opt);
+
+            op->destroy_pipeline(opt);
 
             delete op;
 
@@ -158,42 +179,13 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
     int channels = bottom_blob.c;
     size_t elemsize = bottom_blob.elemsize;
 
-//     fprintf(stderr, "Convolution input %d x %d  pad = %d %d  ksize=%d %d  stride=%d %d\n", w, h, pad_w, pad_h, kernel_w, kernel_h, stride_w, stride_h);
+    //     NCNN_LOGE("Convolution input %d x %d  pad = %d %d  ksize=%d %d  stride=%d %d", w, h, pad_w, pad_h, kernel_w, kernel_h, stride_w, stride_h);
 
     const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
     const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
 
-    Mat bottom_blob_bordered = bottom_blob;
-    if (pad_left > 0 || pad_right > 0 || pad_top > 0 || pad_bottom > 0)
-    {
-        Option opt_b = opt;
-        opt_b.blob_allocator = opt.workspace_allocator;
-        copy_make_border(bottom_blob, bottom_blob_bordered, pad_top, pad_bottom, pad_left, pad_right, BORDER_CONSTANT, pad_value, opt_b);
-    }
-    else if (pad_left == -233 && pad_right == -233 && pad_top == -233 && pad_bottom == -233)
-    {
-        // tensorflow padding=SAME or onnx padding=SAME_UPPER
-        int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
-        int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
-        if (wpad > 0 || hpad > 0)
-        {
-            Option opt_b = opt;
-            opt_b.blob_allocator = opt.workspace_allocator;
-            copy_make_border(bottom_blob, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, pad_value, opt_b);
-        }
-    }
-    else if (pad_left == -234 && pad_right == -234 && pad_top == -234 && pad_bottom == -234)
-    {
-        // onnx padding=SAME_LOWER
-        int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
-        int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
-        if (wpad > 0 || hpad > 0)
-        {
-            Option opt_b = opt;
-            opt_b.blob_allocator = opt.workspace_allocator;
-            copy_make_border(bottom_blob, bottom_blob_bordered, hpad - hpad / 2, hpad / 2, wpad - wpad / 2, wpad / 2, BORDER_CONSTANT, pad_value, opt_b);
-        }
-    }
+    Mat bottom_blob_bordered;
+    make_padding(bottom_blob, bottom_blob_bordered, opt);
     if (bottom_blob_bordered.empty())
         return -100;
 
@@ -231,7 +223,7 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
 
     // num_output
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (int p=0; p<num_output; p++)
+    for (int p = 0; p < num_output; p++)
     {
         float* outptr = top_blob.channel(p);
 
@@ -247,16 +239,16 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
                 const float* kptr = (const float*)weight_data + maxk * channels * p;
 
                 // channels
-                for (int q=0; q<channels; q++)
+                for (int q = 0; q < channels; q++)
                 {
                     const Mat m = bottom_blob_bordered.channel(q);
-                    const float* sptr = m.row(i*stride_h) + j*stride_w;
+                    const float* sptr = m.row(i * stride_h) + j * stride_w;
 
                     for (int k = 0; k < maxk; k++) // 29.23
                     {
-                        float val = sptr[ space_ofs[k] ]; // 20.72
-                        float w = kptr[k];
-                        sum += val * w; // 41.45
+                        float val = sptr[space_ofs[k]]; // 20.72
+                        float wt = kptr[k];
+                        sum += val * wt; // 41.45
                     }
 
                     kptr += maxk;
@@ -284,6 +276,18 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
                 {
                     sum = static_cast<float>(1.f / (1.f + exp(-sum)));
                 }
+                else if (activation_type == 5)
+                {
+                    const float MISH_THRESHOLD = 20;
+                    float x = sum, y;
+                    if (x > MISH_THRESHOLD)
+                        y = x;
+                    else if (x < -MISH_THRESHOLD)
+                        y = expf(x);
+                    else
+                        y = logf(expf(x) + 1);
+                    sum = static_cast<float>(x * tanh(y));
+                }
 
                 outptr[j] = sum;
             }
@@ -295,6 +299,48 @@ int Convolution::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
     return 0;
 }
 
+void Convolution::make_padding(const Mat& bottom_blob, Mat& bottom_blob_bordered, const Option& opt) const
+{
+    int w = bottom_blob.w;
+    int h = bottom_blob.h;
+
+    const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
+    const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
+
+    bottom_blob_bordered = bottom_blob;
+    if (pad_left > 0 || pad_right > 0 || pad_top > 0 || pad_bottom > 0)
+    {
+        Option opt_b = opt;
+        opt_b.blob_allocator = opt.workspace_allocator;
+        copy_make_border(bottom_blob, bottom_blob_bordered, pad_top, pad_bottom, pad_left, pad_right, BORDER_CONSTANT, pad_value, opt_b);
+    }
+    else if (pad_left == -233 && pad_right == -233 && pad_top == -233 && pad_bottom == -233)
+    {
+        // tensorflow padding=SAME or onnx padding=SAME_UPPER
+        int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
+        int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
+        if (wpad > 0 || hpad > 0)
+        {
+            Option opt_b = opt;
+            opt_b.blob_allocator = opt.workspace_allocator;
+            copy_make_border(bottom_blob, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, pad_value, opt_b);
+        }
+    }
+    else if (pad_left == -234 && pad_right == -234 && pad_top == -234 && pad_bottom == -234)
+    {
+        // onnx padding=SAME_LOWER
+        int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
+        int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
+        if (wpad > 0 || hpad > 0)
+        {
+            Option opt_b = opt;
+            opt_b.blob_allocator = opt.workspace_allocator;
+            copy_make_border(bottom_blob, bottom_blob_bordered, hpad - hpad / 2, hpad / 2, wpad - wpad / 2, wpad / 2, BORDER_CONSTANT, pad_value, opt_b);
+        }
+    }
+}
+
+#if NCNN_INT8
 static inline signed char float2int8(float v)
 {
     int int32 = static_cast<int>(round(v));
@@ -310,7 +356,7 @@ int Convolution::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Optio
     int channels = bottom_blob.c;
     size_t elemsize = bottom_blob.elemsize;
 
-//     fprintf(stderr, "Convolution input %d x %d  ksize=%d %d  stride=%d %d\n", w, h, kernel_w, kernel_h, stride_w, stride_h);
+    //     NCNN_LOGE("Convolution input %d x %d  ksize=%d %d  stride=%d %d", w, h, kernel_w, kernel_h, stride_w, stride_h);
 
     const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
     const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
@@ -321,40 +367,11 @@ int Convolution::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Optio
         Option opt_g = opt;
         opt_g.blob_allocator = opt.workspace_allocator;
 
-        quantize_float32_to_int8(bottom_blob, bottom_blob_unbordered, bottom_blob_int8_scale, opt_g);
+        quantize_to_int8(bottom_blob, bottom_blob_unbordered, bottom_blob_int8_scales, opt_g);
     }
 
-    Mat bottom_blob_bordered = bottom_blob_unbordered;
-    if (pad_left > 0 || pad_right > 0 || pad_top > 0 || pad_bottom > 0)
-    {
-        Option opt_b = opt;
-        opt_b.blob_allocator = opt.workspace_allocator;
-        copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, pad_top, pad_bottom, pad_left, pad_right, BORDER_CONSTANT, pad_value, opt_b);
-    }
-    else if (pad_left == -233 && pad_right == -233 && pad_top == -233 && pad_bottom == -233)
-    {
-        // tensorflow padding=SAME or onnx padding=SAME_UPPER
-        int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
-        int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
-        if (wpad > 0 || hpad > 0)
-        {
-            Option opt_b = opt;
-            opt_b.blob_allocator = opt.workspace_allocator;
-            copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, BORDER_CONSTANT, pad_value, opt_b);
-        }
-    }
-    else if (pad_left == -234 && pad_right == -234 && pad_top == -234 && pad_bottom == -234)
-    {
-        // onnx padding=SAME_LOWER
-        int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
-        int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
-        if (wpad > 0 || hpad > 0)
-        {
-            Option opt_b = opt;
-            opt_b.blob_allocator = opt.workspace_allocator;
-            copy_make_border(bottom_blob_unbordered, bottom_blob_bordered, hpad - hpad / 2, hpad / 2, wpad - wpad / 2, wpad / 2, BORDER_CONSTANT, pad_value, opt_b);
-        }
-    }
+    Mat bottom_blob_bordered;
+    make_padding(bottom_blob_unbordered, bottom_blob_bordered, opt);
     if (bottom_blob_bordered.empty())
         return -100;
 
@@ -386,6 +403,7 @@ int Convolution::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Optio
     }
 
     // int8
+    bool use_int8_requantize = int8_scale_term > 100;
     size_t out_elemsize = use_int8_requantize ? 1u : 4u;
 
     top_blob.create(outw, outh, num_output, out_elemsize, opt.blob_allocator);
@@ -394,7 +412,7 @@ int Convolution::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Optio
 
     // num_output
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (int p=0; p<num_output; p++)
+    for (int p = 0; p < num_output; p++)
     {
         signed char* outptr = top_blob.channel(p);
 
@@ -407,65 +425,78 @@ int Convolution::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Optio
                 const signed char* kptr = (const signed char*)weight_data + maxk * channels * p;
 
                 // channels
-                for (int q=0; q<channels; q++)
+                for (int q = 0; q < channels; q++)
                 {
                     const Mat m = bottom_blob_bordered.channel(q);
-                    const signed char* sptr = m.row<signed char>(i*stride_h) + j*stride_w;
+                    const signed char* sptr = m.row<signed char>(i * stride_h) + j * stride_w;
 
                     for (int k = 0; k < maxk; k++)
                     {
-                        int val = sptr[ space_ofs[k] ];
-                        int w = kptr[k];
-                        sum += val * w;
+                        int val = sptr[space_ofs[k]];
+                        int wt = kptr[k];
+                        sum += val * wt;
                     }
 
                     kptr += maxk;
                 }
 
+                float scale_in;
+                if (weight_data_int8_scales[p] == 0)
+                    scale_in = 0;
+                else
+                    scale_in = 1.f / (bottom_blob_int8_scales[0] * weight_data_int8_scales[p]);
+
+                float sumfp32 = sum * scale_in;
+
+                if (bias_term)
+                    sumfp32 += bias_data[p];
+
+                if (activation_type == 1)
+                {
+                    sumfp32 = std::max(sumfp32, 0.f);
+                }
+                else if (activation_type == 2)
+                {
+                    float slope = activation_params[0];
+                    sumfp32 = sumfp32 > 0.f ? sumfp32 : sumfp32 * slope;
+                }
+                else if (activation_type == 3)
+                {
+                    float min = activation_params[0];
+                    float max = activation_params[1];
+                    if (sumfp32 < min)
+                        sumfp32 = min;
+                    if (sumfp32 > max)
+                        sumfp32 = max;
+                }
+                else if (activation_type == 4)
+                {
+                    sumfp32 = static_cast<float>(1.f / (1.f + exp(-sumfp32)));
+                }
+                else if (activation_type == 5)
+                {
+                    const float MISH_THRESHOLD = 20;
+                    float x = sumfp32, y;
+                    if (x > MISH_THRESHOLD)
+                        y = x;
+                    else if (x < -MISH_THRESHOLD)
+                        y = expf(x);
+                    else
+                        y = logf(expf(x) + 1);
+                    sumfp32 = static_cast<float>(x * tanh(y));
+                }
+
                 if (use_int8_requantize)
                 {
-                    // requantize and relu
-                    float scale_in;
-                    if (weight_data_int8_scales[p] == 0)
-                        scale_in = 0;
-                    else
-                        scale_in = 1.f / (bottom_blob_int8_scale * weight_data_int8_scales[p]);
-
-                    float sumfp32 = sum * scale_in;
-
-                    if (bias_term)
-                        sumfp32 += bias_data[p];
-
-                    float scale_out = top_blob_int8_scale;//FIXME load param
-
+                    // requantize
+                    float scale_out = top_blob_int8_scales[0];
                     signed char sums8 = float2int8(sumfp32 * scale_out);
-
-                    if (activation_type == 1)
-                    {
-                        sums8 = std::max(sums8, (signed char)0);
-                    }
-
                     outptr[0] = sums8;
                     outptr += 1;
                 }
                 else
                 {
-                    // dequantize and relu
-                    float scale_in;
-                    if (weight_data_int8_scales[p] == 0)
-                        scale_in = 0;
-                    else
-                        scale_in = 1.f / (bottom_blob_int8_scale * weight_data_int8_scales[p]);
-
-                    float sumfp32 = sum * scale_in;
-                    if (bias_term)
-                        sumfp32 += bias_data[p];
-
-                    if (activation_type == 1)
-                    {
-                        sumfp32 = std::max(sumfp32, 0.f);
-                    }
-
+                    // dequantize
                     ((float*)outptr)[0] = sumfp32;
                     outptr += 4;
                 }
@@ -475,5 +506,6 @@ int Convolution::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Optio
 
     return 0;
 }
+#endif // NCNN_INT8
 
 } // namespace ncnn

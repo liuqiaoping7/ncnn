@@ -13,12 +13,13 @@
 // specific language governing permissions and limitations under the License.
 
 #include "priorbox_vulkan.h"
-#include <algorithm>
+
+#include "layer_shader_type.h"
+#include "platform.h"
+
 #include <math.h>
 
 namespace ncnn {
-
-DEFINE_LAYER_CREATOR(PriorBox_vulkan)
 
 PriorBox_vulkan::PriorBox_vulkan()
 {
@@ -83,7 +84,7 @@ int PriorBox_vulkan::create_pipeline(const Option& opt)
 
         pipeline_priorbox = new Pipeline(vkdev);
         pipeline_priorbox->set_optimal_local_size_xyz();
-        pipeline_priorbox->create("priorbox", opt, specializations, 4, 6);
+        pipeline_priorbox->create(LayerShaderType::priorbox, opt, specializations);
     }
 
     // mxnet style
@@ -104,7 +105,7 @@ int PriorBox_vulkan::create_pipeline(const Option& opt)
 
         pipeline_priorbox_mxnet = new Pipeline(vkdev);
         pipeline_priorbox_mxnet->set_optimal_local_size_xyz();
-        pipeline_priorbox_mxnet->create("priorbox_mxnet", opt, specializations, 3, 4);
+        pipeline_priorbox_mxnet->create(LayerShaderType::priorbox_mxnet, opt, specializations);
     }
 
     return 0;
@@ -162,7 +163,7 @@ int PriorBox_vulkan::forward(const std::vector<VkMat>& bottom_blobs, std::vector
         }
 
         VkMat& top_blob = top_blobs[0];
-        top_blob.create(4 * w * h * num_prior / elempack, elemsize, elempack, opt.blob_vkallocator, opt.staging_vkallocator);
+        top_blob.create(4 * w * h * num_prior / elempack, elemsize, elempack, opt.blob_vkallocator);
         if (top_blob.empty())
             return -100;
 
@@ -216,7 +217,7 @@ int PriorBox_vulkan::forward(const std::vector<VkMat>& bottom_blobs, std::vector
     }
 
     VkMat& top_blob = top_blobs[0];
-    top_blob.create(4 * w * h * num_prior, 2, elemsize, 1, opt.blob_vkallocator, opt.staging_vkallocator);
+    top_blob.create(4 * w * h * num_prior, 2, elemsize, 1, opt.blob_vkallocator);
     if (top_blob.empty())
         return -100;
 

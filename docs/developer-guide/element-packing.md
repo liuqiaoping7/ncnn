@@ -29,7 +29,7 @@ Though the real count of values doubles when elempack is two, the wide-sized val
 
 ### packing style convention
 
-In practise, elempack 1, 4, 8 are the most common cases. It is possible to use any other packing style in theory.
+In practice, elempack 1, 4, 8 are the most common cases. It is possible to use any other packing style in theory.
 
 The following table show the packing axis used in ncnn for different dimension.
 
@@ -97,7 +97,7 @@ Here is an example of using convert packing to convert RGB interleaved data to p
 
 **NOTE:** The following code is just presented to explain what packing is and the conversion process. Do not use it in production due to its poor performance. Do use ncnn::Mat::from_pixels()
 
-```
+```cpp
 // rgb_interleaved_u8 is RGB RGB RGB ...
 // rgb_interleaved_u8.w = w;
 // rgb_interleaved_u8.h = h;

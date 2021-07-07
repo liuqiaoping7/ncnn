@@ -13,15 +13,15 @@
 // specific language governing permissions and limitations under the License.
 
 #include "unaryop_vulkan.h"
-#include <algorithm>
+
+#include "layer_shader_type.h"
 
 namespace ncnn {
-
-DEFINE_LAYER_CREATOR(UnaryOp_vulkan)
 
 UnaryOp_vulkan::UnaryOp_vulkan()
 {
     support_vulkan = true;
+    support_image_storage = true;
 
     pipeline_unaryop = 0;
     pipeline_unaryop_pack4 = 0;
@@ -89,7 +89,7 @@ int UnaryOp_vulkan::create_pipeline(const Option& opt)
     {
         pipeline_unaryop = new Pipeline(vkdev);
         pipeline_unaryop->set_optimal_local_size_xyz(local_size_xyz);
-        pipeline_unaryop->create("unaryop", opt, specializations, 1, 5);
+        pipeline_unaryop->create(LayerShaderType::unaryop, opt, specializations);
     }
 
     // pack4
@@ -97,7 +97,7 @@ int UnaryOp_vulkan::create_pipeline(const Option& opt)
     {
         pipeline_unaryop_pack4 = new Pipeline(vkdev);
         pipeline_unaryop_pack4->set_optimal_local_size_xyz(local_size_xyz);
-        pipeline_unaryop_pack4->create("unaryop_pack4", opt, specializations, 1, 5);
+        pipeline_unaryop_pack4->create(LayerShaderType::unaryop_pack4, opt, specializations);
     }
 
     // pack8
@@ -105,7 +105,7 @@ int UnaryOp_vulkan::create_pipeline(const Option& opt)
     {
         pipeline_unaryop_pack8 = new Pipeline(vkdev);
         pipeline_unaryop_pack8->set_optimal_local_size_xyz(local_size_xyz);
-        pipeline_unaryop_pack8->create("unaryop_pack8", opt, specializations, 1, 5);
+        pipeline_unaryop_pack8->create(LayerShaderType::unaryop_pack8, opt, specializations);
     }
 
     return 0;
@@ -140,8 +140,32 @@ int UnaryOp_vulkan::forward_inplace(VkMat& bottom_top_blob, VkCompute& cmd, cons
     constants[4].i = bottom_top_blob.cstep;
 
     const Pipeline* pipeline = elempack == 8 ? pipeline_unaryop_pack8
-                             : elempack == 4 ? pipeline_unaryop_pack4
-                             : pipeline_unaryop;
+                               : elempack == 4 ? pipeline_unaryop_pack4
+                               : pipeline_unaryop;
+
+    cmd.record_pipeline(pipeline, bindings, constants, bottom_top_blob);
+
+    return 0;
+}
+
+int UnaryOp_vulkan::forward_inplace(VkImageMat& bottom_top_blob, VkCompute& cmd, const Option& /*opt*/) const
+{
+    int elempack = bottom_top_blob.elempack;
+
+    std::vector<VkImageMat> bindings(2);
+    bindings[0] = bottom_top_blob;
+    bindings[1] = bottom_top_blob;
+
+    std::vector<vk_constant_type> constants(5);
+    constants[0].i = bottom_top_blob.dims;
+    constants[1].i = bottom_top_blob.w;
+    constants[2].i = bottom_top_blob.h;
+    constants[3].i = bottom_top_blob.c;
+    constants[4].i = 0; //bottom_top_blob.cstep;
+
+    const Pipeline* pipeline = elempack == 8 ? pipeline_unaryop_pack8
+                               : elempack == 4 ? pipeline_unaryop_pack4
+                               : pipeline_unaryop;
 
     cmd.record_pipeline(pipeline, bindings, constants, bottom_top_blob);
 

@@ -20,516 +20,71 @@
 
 namespace ncnn {
 
-DEFINE_LAYER_CREATOR(Padding_arm)
+#if __ARM_NEON
+#include "padding_pack4.h"
+#include "padding_pack4_bf16s_fp16s.h"
+#include "padding_pack8_int8.h"
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+#include "padding_pack8_fp16s.h"
+#endif
+#endif // __ARM_NEON
 
 Padding_arm::Padding_arm()
 {
 #if __ARM_NEON
     support_packing = true;
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+    support_fp16_storage = true;
+#endif
 #endif // __ARM_NEON
+
+    support_bf16_storage = true;
 }
 
-#if __ARM_NEON
-static void padding_constant_pack4_neon(const Mat& src, Mat& dst, int top, int bottom, int left, int right, float32x4_t v)
+int Padding_arm::create_pipeline(const Option& opt)
 {
-    const float* ptr = src;
-    float* outptr = dst;
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+    if (opt.use_fp16_storage)
+    {
+        ncnn::cast_float32_to_float16(per_channel_pad_data, per_channel_pad_data_fp16, opt);
+    }
+#endif
 
-    int w = src.w;
-    int h = src.h;
+    if (opt.use_bf16_storage)
+    {
+        value_bf16 = float32_to_bfloat16(value);
 
-    int top_size = top * dst.w;
-    int bottom_size = bottom * dst.w;
+        ncnn::cast_float32_to_bfloat16(per_channel_pad_data, per_channel_pad_data_bf16, opt);
+    }
 
-#if __aarch64__
-    asm volatile(
-        "mov    v0.16b, %10.16b         \n"
-        "mov    v1.16b, %10.16b         \n"
-        "mov    v2.16b, %10.16b         \n"
-        "mov    v3.16b, %10.16b         \n"
-
-        // fill top
-        "lsr    w4, %w8, #3             \n"// w4 = nn = top_size >> 3
-        "cmp    w4, #0                  \n"
-        "beq    1f                      \n"
-
-        "0:                             \n"
-        "st1    {v0.4s, v1.4s, v2.4s, v3.4s}, [%0], #64 \n"
-        "subs   w4, w4, #1              \n"
-        "st1    {v0.4s, v1.4s, v2.4s, v3.4s}, [%0], #64 \n"
-        "bne    0b                      \n"
-
-        "1:                             \n"
-
-        // fill top remain
-        "and    w4, %w8, #7             \n"// w4 = remain = top_size & 7
-
-        "cmp    w4, #4                  \n"// w4 >= 4
-        "blt    2f                      \n"
-        "sub    w4, w4, #4              \n"
-        "st1    {v0.4s, v1.4s, v2.4s, v3.4s}, [%0], #64 \n"
-        "2:                             \n"
-
-        "cmp    w4, #2                  \n"// w4 >= 2
-        "blt    3f                      \n"
-        "sub    w4, w4, #2              \n"
-        "st1    {v0.4s, v1.4s}, [%0], #32 \n"
-        "3:                             \n"
-
-        "cmp    w4, #0                  \n"// w4 > 0
-        "beq    4f                      \n"
-        "st1    {v0.4s}, [%0], #16      \n"
-        "4:                             \n"
-
-        // fill center h loop
-        "cmp    %w5, #0                 \n"
-        "beq    15f                     \n"
-        "5:                             \n"
-
-        // fill left
-        "mov    w4, %w6                 \n"// w4 = left
-        "cmp    w4, #0                  \n"
-        "beq    7f                      \n"
-
-        "6:                             \n"
-        "st1    {v0.4s}, [%0], #16      \n"
-        "subs   w4, w4, #1              \n"
-        "bne    6b                      \n"
-
-        "7:                             \n"
-
-        // fill middle
-        "lsr    w4, %w4, #3             \n"// w4 = nn = w >> 3
-        "cmp    w4, #0                  \n"
-        "beq    9f                      \n"
-
-        "8:                             \n"
-        "prfm   pldl1keep, [%1, #512]   \n"
-        "ld1    {v16.4s, v17.4s, v18.4s, v19.4s}, [%1], #64 \n"
-        "prfm   pldl1keep, [%1, #512]   \n"
-        "ld1    {v20.4s, v21.4s, v22.4s, v23.4s}, [%1], #64 \n"
-        "subs   w4, w4, #1              \n"
-        "st1    {v16.4s, v17.4s, v18.4s, v19.4s}, [%0], #64 \n"
-        "st1    {v20.4s, v21.4s, v22.4s, v23.4s}, [%0], #64 \n"
-        "bne    8b                      \n"
-
-        "9:                             \n"
-
-        "and    w4, %w4, #7             \n"// w4 = remain = w & 7
-
-        "cmp    w4, #4                  \n"// w4 >= 4
-        "blt    10f                     \n"
-        "prfm   pldl1keep, [%1, #512]   \n"
-        "ld1    {v16.4s, v17.4s, v18.4s, v19.4s}, [%1], #64 \n"
-        "sub    w4, w4, #4              \n"
-        "st1    {v16.4s, v17.4s, v18.4s, v19.4s}, [%0], #64 \n"
-        "10:                            \n"
-
-        "cmp    w4, #2                  \n"// w4 >= 2
-        "blt    11f                     \n"
-        "prfm   pldl1keep, [%1, #256]   \n"
-        "ld1    {v16.4s, v17.4s}, [%1], #32 \n"
-        "sub    w4, w4, #2              \n"
-        "st1    {v16.4s, v17.4s}, [%0], #32 \n"
-        "11:                            \n"
-
-        "cmp    w4, #0                  \n"// w4 > 0
-        "beq    12f                     \n"
-        "prfm   pldl1keep, [%1, #128]   \n"
-        "ld1    {v16.4s}, [%1], #16     \n"
-        "st1    {v16.4s}, [%0], #16     \n"
-        "12:                            \n"
-
-        // fill right
-        "mov    w4, %w7                 \n"// w4 = right
-        "cmp    w4, #0                  \n"
-        "beq    14f                     \n"
-
-        "13:                            \n"
-        "subs   w4, w4, #1              \n"
-        "st1    {v0.4s}, [%0], #16      \n"
-        "bne    13b                     \n"
-        "14:                            \n"
-
-        "subs   %w5, %w5, #1            \n"
-        "bne    5b                      \n"
-
-        "15:                            \n"
-
-        // fill bottom
-        "lsr    w4, %w9, #3             \n"// w4 = nn = bottom_size >> 3
-        "cmp    w4, #0                  \n"
-        "beq    17f                     \n"
-
-        "16:                            \n"
-        "st1    {v0.4s, v1.4s, v2.4s, v3.4s}, [%0], #64 \n"
-        "subs   w4, w4, #1              \n"
-        "st1    {v0.4s, v1.4s, v2.4s, v3.4s}, [%0], #64 \n"
-        "bne    16b                     \n"
-        "17:                            \n"
-
-        // fill bottom remain
-        "and    w4, %w9, #7             \n"// w4 = remain = bottom_size & 7
-
-        "cmp    w4, #4                  \n"// w4 >= 4
-        "blt    18f                     \n"
-        "sub    w4, w4, #4              \n"
-        "st1    {v0.4s, v1.4s, v2.4s, v3.4s}, [%0], #64 \n"
-        "18:                            \n"
-
-        "cmp    w4, #2                  \n"// w4 >= 2
-        "blt    19f                     \n"
-        "sub    w4, w4, #2              \n"
-        "st1    {v0.4s, v1.4s}, [%0], #32 \n"
-        "19:                            \n"
-
-        "cmp    w4, #0                  \n"// w4 > 0
-        "beq    20f                     \n"
-        "st1    {v0.4s}, [%0], #16      \n"
-        "20:                            \n"
-
-        : "=r"(outptr),     // %0
-          "=r"(ptr)         // %1
-        : "0"(outptr),
-          "1"(ptr),
-          "r"(w),           // %4
-          "r"(h),           // %5
-          "r"(left),        // %6
-          "r"(right),       // %7
-          "r"(top_size),    // %8
-          "r"(bottom_size), // %9
-          "w"(v)            // %10
-        : "cc", "memory", "x4", "v0", "v1", "v2", "v3", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"
-    );
-#else // __aarch64__
-    asm volatile(
-        "vmov       q0, %q10            \n"
-        "vmov       q1, %q10            \n"
-        "vmov       q2, %q10            \n"
-        "vmov       q3, %q10            \n"
-
-        // fill top
-        "lsr        r4, %8, #3          \n"// r4 = nn = top_size >> 3
-        "cmp        r4, #0              \n"
-        "beq        1f                  \n"
-
-        "0:                             \n"
-        "vstm       %0!, {d0-d7}        \n"
-        "subs       r4, r4, #1          \n"
-        "vstm       %0!, {d0-d7}        \n"
-        "bne        0b                  \n"
-
-        "1:                             \n"
-
-        // fill top remain
-        "and        r4, %8, #7          \n"// r4 = remain = top_size & 7
-
-        "cmp        r4, #4              \n"// r4 >= 4
-        "blt        2f                  \n"
-        "sub        r4, r4, #4          \n"
-        "vstm       %0!, {d0-d7}        \n"
-        "2:                             \n"
-
-        "cmp        r4, #2              \n"// r4 >= 2
-        "blt        3f                  \n"
-        "sub        r4, r4, #2          \n"
-        "vst1.f32   {d0-d3}, [%0 :128]! \n"
-        "3:                             \n"
-
-        "cmp        r4, #0              \n"// r4 > 0
-        "beq        4f                  \n"
-        "vst1.f32   {d0-d1}, [%0 :128]! \n"
-        "4:                             \n"
-
-        // fill center h loop
-        "cmp        %5, #0              \n"
-        "beq        15f                 \n"
-        "5:                             \n"
-
-        // fill left
-        "mov        r4, %6              \n"// r4 = left
-        "cmp        r4, #0              \n"
-        "beq        7f                  \n"
-
-        "6:                             \n"
-        "vst1.f32   {d0-d1}, [%0 :128]! \n"
-        "subs       r4, r4, #1          \n"
-        "bne        6b                  \n"
-
-        "7:                             \n"
-
-        // fill middle
-        "lsr        r4, %4, #3          \n"// r4 = nn = w >> 3
-        "cmp        r4, #0              \n"
-        "beq        9f                  \n"
-
-        "8:                             \n"
-        "pld        [%1, #512]          \n"
-        "vldm       %1!, {d16-d23}      \n"
-        "pld        [%1, #512]          \n"
-        "vldm       %1!, {d24-d31}      \n"
-        "subs       r4, r4, #1          \n"
-        "vstm       %0!, {d16-d23}      \n"
-        "vstm       %0!, {d24-d31}      \n"
-        "bne        8b                  \n"
-
-        "9:                             \n"
-
-        "and        r4, %4, #7          \n"// r4 = remain = w & 7
-
-        "cmp        r4, #4              \n"// r4 >= 4
-        "blt        10f                 \n"
-        "pld        [%1, #512]          \n"
-        "vldm       %1!, {d16-d23}      \n"
-        "sub        r4, r4, #4          \n"
-        "vstm       %0!, {d16-d23}      \n"
-        "10:                            \n"
-
-        "cmp        r4, #2              \n"// r4 >= 2
-        "blt        11f                 \n"
-        "pld        [%1, #256]          \n"
-        "vld1.f32   {d16-d19}, [%1 :128]! \n"
-        "sub        r4, r4, #2          \n"
-        "vst1.f32   {d16-d19}, [%0 :128]! \n"
-        "11:                            \n"
-
-        "cmp        r4, #0              \n"// r4 > 0
-        "beq        12f                 \n"
-        "pld        [%1, #128]          \n"
-        "vld1.f32   {d16-d17}, [%1 :128]! \n"
-        "vst1.f32   {d16-d17}, [%0 :128]! \n"
-        "12:                            \n"
-
-        // fill right
-        "mov        r4, %7              \n"// r4 = right
-        "cmp        r4, #0              \n"
-        "beq        14f                 \n"
-
-        "13:                            \n"
-        "subs       r4, r4, #1          \n"
-        "vst1.f32   {d0-d1}, [%0 :128]! \n"
-        "bne        13b                 \n"
-        "14:                            \n"
-
-        "subs       %5, %5, #1          \n"
-        "bne        5b                  \n"
-
-        "15:                            \n"
-
-        // fill bottom
-        "lsr        r4, %9, #3          \n"// r4 = nn = bottom_size >> 3
-        "cmp        r4, #0              \n"
-        "beq        17f                 \n"
-
-        "16:                            \n"
-        "vstm       %0!, {d0-d7}        \n"
-        "subs       r4, r4, #1          \n"
-        "vstm       %0!, {d0-d7}        \n"
-        "bne        16b                 \n"
-        "17:                            \n"
-
-        // fill bottom remain
-        "and        r4, %9, #7          \n"// r4 = remain = bottom_size & 7
-
-        "cmp        r4, #4              \n"// r4 >= 4
-        "blt        18f                 \n"
-        "sub        r4, r4, #4          \n"
-        "vstm       %0!, {d0-d7}        \n"
-        "18:                            \n"
-
-        "cmp        r4, #2              \n"// r4 >= 2
-        "blt        19f                 \n"
-        "sub        r4, r4, #2          \n"
-        "vst1.f32   {d0-d3}, [%0 :128]! \n"
-        "19:                            \n"
-
-        "cmp        r4, #0              \n"// r4 > 0
-        "beq        20f                 \n"
-        "vst1.f32   {d0-d1}, [%0 :128]! \n"
-        "20:                            \n"
-
-        : "=r"(outptr),     // %0
-          "=r"(ptr)         // %1
-        : "0"(outptr),
-          "1"(ptr),
-          "r"(w),           // %4
-          "r"(h),           // %5
-          "r"(left),        // %6
-          "r"(right),       // %7
-          "r"(top_size),    // %8
-          "r"(bottom_size), // %9
-          "w"(v)            // %10
-        : "cc", "memory", "r4", "q0", "q1", "q2", "q3", "q8", "q9", "q10", "q11", "q12", "q13", "q14", "q15"
-    );
-#endif // __aarch64__
+    return 0;
 }
 
-static void padding_replicate_pack4_neon(const Mat& src, Mat& dst, int top, int bottom, int left, int right)
+int Padding_arm::destroy_pipeline(const Option& /*opt*/)
 {
-    const float* ptr = src;
-    float* outptr = dst;
-
-    // fill top
-    for (int y = 0; y < top; y++)
-    {
-        const float* ptr0 = ptr;
-        float32x4_t _p = vld1q_f32(ptr0);
-        for (int x = 0; x < left; x++)
-        {
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        for (int x = 0; x < src.w; x++)
-        {
-            _p = vld1q_f32(ptr0);
-            vst1q_f32(outptr, _p);
-            ptr0 += 4;
-            outptr += 4;
-        }
-        for (int x = 0; x < right; x++)
-        {
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-    }
-    // fill center
-    for (int y = 0; y < src.h; y++)
-    {
-        float32x4_t _p = vld1q_f32(ptr);
-        for (int x = 0; x < left; x++)
-        {
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        for (int x = 0; x < src.w; x++)
-        {
-            _p = vld1q_f32(ptr);
-            vst1q_f32(outptr, _p);
-            ptr += 4;
-            outptr += 4;
-        }
-        for (int x = 0; x < right; x++)
-        {
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-    }
-    // fill bottom
-    ptr -= src.w * 4;
-    for (int y = 0; y < bottom; y++)
-    {
-        const float* ptr0 = ptr;
-        float32x4_t _p = vld1q_f32(ptr0);
-        for (int x = 0; x < left; x++)
-        {
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        for (int x = 0; x < src.w; x++)
-        {
-            _p = vld1q_f32(ptr0);
-            vst1q_f32(outptr, _p);
-            ptr0 += 4;
-            outptr += 4;
-        }
-        for (int x = 0; x < right; x++)
-        {
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-    }
+    return 0;
 }
-
-static void padding_reflect_pack4_neon(const Mat& src, Mat& dst, int top, int bottom, int left, int right)
-{
-    const float* ptr = src;
-    float* outptr = dst;
-
-    // fill top
-    ptr += top * src.w * 4;
-    for (int y = 0; y < top; y++)
-    {
-        const float* ptr0 = ptr;
-        for (int x = 0; x < left; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr0 + (left - x) * 4);
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        for (int x = 0; x < src.w; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr0);
-            vst1q_f32(outptr, _p);
-            ptr0 += 4;
-            outptr += 4;
-        }
-        for (int x = 0; x < right; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr0 - 8 - x * 4);
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        ptr -= src.w * 4;
-    }
-    // fill center
-    for (int y = 0; y < src.h; y++)
-    {
-        for (int x = 0; x < left; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr + (left - x) * 4);
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        for (int x = 0; x < src.w; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr);
-            vst1q_f32(outptr, _p);
-            ptr += 4;
-            outptr += 4;
-        }
-        for (int x = 0; x < right; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr - 8 - x * 4);
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-    }
-    // fill bottom
-    ptr -= 2 * src.w * 4;
-    for (int y = 0; y < bottom; y++)
-    {
-        const float* ptr0 = ptr;
-        for (int x = 0; x < left; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr0 + (left - x) * 4);
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        for (int x = 0; x < src.w; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr0);
-            vst1q_f32(outptr, _p);
-            ptr0 += 4;
-            outptr += 4;
-        }
-        for (int x = 0; x < right; x++)
-        {
-            float32x4_t _p = vld1q_f32(ptr0 - 8 - x * 4);
-            vst1q_f32(outptr, _p);
-            outptr += 4;
-        }
-        ptr -= src.w * 4;
-    }
-}
-#endif // __ARM_NEON
 
 int Padding_arm::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
 {
-    if (top == 0 && bottom == 0 && left == 0 && right == 0)
+    if (top == 0 && bottom == 0 && left == 0 && right == 0 && front == 0 && behind == 0)
     {
         top_blob = bottom_blob;
         return 0;
     }
+
+    int elembits = bottom_blob.elembits();
+
+    if (elembits == 8)
+        return forward_int8(bottom_blob, top_blob, opt);
+
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+    if (opt.use_fp16_storage && elembits == 16)
+        return forward_bf16s_fp16s(bottom_blob, top_blob, opt);
+#endif
+
+    if (opt.use_bf16_storage && elembits == 16)
+        return forward_bf16s_fp16s(bottom_blob, top_blob, opt);
 
     int w = bottom_blob.w;
     int h = bottom_blob.h;
@@ -539,79 +94,417 @@ int Padding_arm::forward(const Mat& bottom_blob, Mat& top_blob, const Option& op
     int elempack = bottom_blob.elempack;
 
 #if __ARM_NEON
-    if (opt.use_packing_layout)
-    {
-
     if (elempack == 4)
     {
-        int outw = w + left + right;
-
         if (dims == 1)
         {
-            top_blob.create(outw, elemsize, elempack, opt.blob_allocator);
+            int outw = w * elempack + left + right;
+
+            int out_elempack = outw % 4 == 0 ? 4 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
             if (top_blob.empty())
                 return -100;
 
-            if (type == 0)
-                padding_constant_pack4_neon(bottom_blob, top_blob, 0, 0, left, right, vdupq_n_f32(value));
-            else if (type == 1)
-                padding_replicate_pack4_neon(bottom_blob, top_blob, 0, 0, left, right);
-            else // if (type == 2)
-                padding_reflect_pack4_neon(bottom_blob, top_blob, 0, 0, left, right);
-
-            return 0;
+            if (left % 4 == 0 && out_elempack == 4)
+            {
+                // TODO
+            }
         }
-
-        int outh = h + top + bottom;
 
         if (dims == 2)
         {
-            top_blob.create(outw, outh, elemsize, elempack, opt.blob_allocator);
+            int outw = w + left + right;
+            int outh = h * elempack + top + bottom;
+
+            int out_elempack = outh % 4 == 0 ? 4 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
             if (top_blob.empty())
                 return -100;
 
-            if (type == 0)
-                padding_constant_pack4_neon(bottom_blob, top_blob, top, bottom, left, right, vdupq_n_f32(value));
-            else if (type == 1)
-                padding_replicate_pack4_neon(bottom_blob, top_blob, top, bottom, left, right);
-            else // if (type == 2)
-                padding_reflect_pack4_neon(bottom_blob, top_blob, top, bottom, left, right);
-
-            return 0;
+            if (top % 4 == 0 && out_elempack == 4)
+            {
+                // TODO
+            }
         }
 
         if (dims == 3)
         {
-            top_blob.create(outw, outh, channels, elemsize, elempack, opt.blob_allocator);
+            int outw = w + left + right;
+            int outh = h + top + bottom;
+            int outc = channels * elempack + front + behind;
+
+            int out_elempack = outc % 4 == 0 ? 4 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh, outc / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
             if (top_blob.empty())
                 return -100;
 
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int q=0; q<channels; q++)
+            if (front % 4 == 0 && out_elempack == 4 && !(outc != channels * elempack && type != 0))
             {
-                const Mat m = bottom_blob.channel(q);
-                Mat borderm = top_blob.channel(q);
+                int front_ = front / elempack;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < outc / out_elempack; q++)
+                {
+                    Mat borderm = top_blob.channel(q);
 
-                float32x4_t pad_value = per_channel_pad_data_size ? vld1q_f32((const float*)per_channel_pad_data + q * 4) : vdupq_n_f32(value);
+                    float32x4_t pad_value = per_channel_pad_data_size ? vld1q_f32((const float*)per_channel_pad_data + q * 4) : vdupq_n_f32(value);
+                    //Channel padding
+                    if ((q - front_) < 0 || (q - front_) >= channels)
+                    {
+                        borderm.fill(pad_value);
+                    }
+                    else
+                    {
+                        const Mat m = bottom_blob.channel(q - front_);
+                        if (type == 0)
+                            padding_constant_pack4_neon(m, borderm, top, bottom, left, right, pad_value);
+                        if (type == 1)
+                            padding_replicate_pack4_neon(m, borderm, top, bottom, left, right);
+                        if (type == 2)
+                            padding_reflect_pack4_neon(m, borderm, top, bottom, left, right);
+                    }
+                }
 
-                if (type == 0)
-                    padding_constant_pack4_neon(m, borderm, top, bottom, left, right, pad_value);
-                else if (type == 1)
-                    padding_replicate_pack4_neon(m, borderm, top, bottom, left, right);
-                else // if (type == 2)
-                    padding_reflect_pack4_neon(m, borderm, top, bottom, left, right);
+                return 0;
             }
-
-            return 0;
         }
-
-        return 0;
     }
-
-    } // opt.use_packing_layout
 #endif // __ARM_NEON
 
-    return Padding::forward(bottom_blob, top_blob, opt);
+    Mat bottom_blob_unpacked = bottom_blob;
+    if (elempack != 1)
+    {
+        Option opt_pack1 = opt;
+        opt_pack1.blob_allocator = opt.workspace_allocator;
+
+        convert_packing(bottom_blob, bottom_blob_unpacked, 1, opt_pack1);
+    }
+
+    return Padding::forward(bottom_blob_unpacked, top_blob, opt);
+}
+
+int Padding_arm::forward_bf16s_fp16s(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+{
+    int w = bottom_blob.w;
+    int h = bottom_blob.h;
+    int channels = bottom_blob.c;
+    int dims = bottom_blob.dims;
+    size_t elemsize = bottom_blob.elemsize;
+    int elempack = bottom_blob.elempack;
+
+#if __ARM_NEON
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+    if (elempack == 8)
+    {
+        if (dims == 1)
+        {
+            int outw = w * elempack + left + right;
+
+            int out_elempack = outw % 8 == 0 ? 8 : outw % 4 == 0 ? 4 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (left % 8 == 0 && out_elempack == 8)
+            {
+                // TODO
+            }
+        }
+
+        if (dims == 2)
+        {
+            int outw = w + left + right;
+            int outh = h * elempack + top + bottom;
+
+            int out_elempack = outh % 8 == 0 ? 8 : outh % 4 == 0 ? 4 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (top % 8 == 0 && out_elempack == 8)
+            {
+                // TODO
+            }
+        }
+
+        if (dims == 3)
+        {
+            int outw = w + left + right;
+            int outh = h + top + bottom;
+            int outc = channels * elempack + front + behind;
+
+            int out_elempack = outc % 8 == 0 ? 8 : outc % 4 == 0 ? 4 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh, outc / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (front % 8 == 0 && out_elempack == 8 && !(outc != channels * elempack && type != 0))
+            {
+                int front_ = front / elempack;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < outc / out_elempack; q++)
+                {
+                    Mat borderm = top_blob.channel(q);
+
+                    float16x8_t pad_value = per_channel_pad_data_size ? vld1q_f16((const __fp16*)per_channel_pad_data_fp16 + q * 8) : vdupq_n_f16((__fp16)value);
+
+                    //Channel padding
+                    if ((q - front_) < 0 || (q - front_) >= channels)
+                    {
+                        borderm.fill(pad_value);
+                    }
+                    else
+                    {
+                        const Mat m = bottom_blob.channel(q - front_);
+                        if (type == 0)
+                            padding_constant_pack8_fp16s_neon(m, borderm, top, bottom, left, right, pad_value);
+                        if (type == 1)
+                            padding_replicate_pack8_fp16s_neon(m, borderm, top, bottom, left, right);
+                        if (type == 2)
+                            padding_reflect_pack8_fp16s_neon(m, borderm, top, bottom, left, right);
+                    }
+                }
+
+                return 0;
+            }
+        }
+    }
+#endif
+
+    if (elempack == 4)
+    {
+        if (dims == 1)
+        {
+            int outw = w * elempack + left + right;
+
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+            int out_elempack = opt.use_fp16_arithmetic && outw % 8 == 0 ? 8 : outw % 4 == 0 ? 4 : 1;
+#else
+            int out_elempack = outw % 4 == 0 ? 4 : 1;
+#endif
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (left % 4 == 0 && out_elempack == 4)
+            {
+                // TODO
+            }
+        }
+
+        if (dims == 2)
+        {
+            int outw = w + left + right;
+            int outh = h * elempack + top + bottom;
+
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+            int out_elempack = opt.use_fp16_arithmetic && outh % 8 == 0 ? 8 : outh % 4 == 0 ? 4 : 1;
+#else
+            int out_elempack = outh % 4 == 0 ? 4 : 1;
+#endif
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (top % 4 == 0 && out_elempack == 4)
+            {
+                // TODO
+            }
+        }
+
+        if (dims == 3)
+        {
+            int outw = w + left + right;
+            int outh = h + top + bottom;
+            int outc = channels * elempack + front + behind;
+
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+            int out_elempack = opt.use_fp16_arithmetic && outc % 8 == 0 ? 8 : outc % 4 == 0 ? 4 : 1;
+#else
+            int out_elempack = outc % 4 == 0 ? 4 : 1;
+#endif
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh, outc / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (front % 4 == 0 && out_elempack == 4 && !(outc != channels * elempack && type != 0))
+            {
+                int front_ = front / elempack;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < outc / out_elempack; q++)
+                {
+                    Mat borderm = top_blob.channel(q);
+
+#if __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+                    uint16x4_t pad_value;
+                    if (opt.use_fp16_storage)
+                    {
+                        pad_value = per_channel_pad_data_size ? vreinterpret_u16_f16(vld1_f16((const __fp16*)per_channel_pad_data_fp16 + q * 4)) : vreinterpret_u16_f16(vdup_n_f16((__fp16)value));
+                    }
+                    else
+                    {
+                        pad_value = per_channel_pad_data_size ? vld1_u16((const unsigned short*)per_channel_pad_data_bf16 + q * 4) : vdup_n_u16(value_bf16);
+                    }
+#else
+                    uint16x4_t pad_value = per_channel_pad_data_size ? vld1_u16((const unsigned short*)per_channel_pad_data_bf16 + q * 4) : vdup_n_u16(value_bf16);
+#endif
+                    //Channel padding
+                    if ((q - front_) < 0 || (q - front_) >= channels)
+                    {
+                        borderm.fill(pad_value);
+                    }
+                    else
+                    {
+                        const Mat m = bottom_blob.channel(q - front_);
+                        if (type == 0)
+                            padding_constant_pack4_bf16_fp16s_neon(m, borderm, top, bottom, left, right, vcombine_u16(pad_value, pad_value));
+                        if (type == 1)
+                            padding_replicate_pack4_bf16_fp16s_neon(m, borderm, top, bottom, left, right);
+                        if (type == 2)
+                            padding_reflect_pack4_bf16_fp16s_neon(m, borderm, top, bottom, left, right);
+                    }
+                }
+
+                return 0;
+            }
+        }
+    }
+#endif // __ARM_NEON
+
+    Mat bottom_blob_unpacked = bottom_blob;
+    if (elempack != 1)
+    {
+        Option opt_pack1 = opt;
+        opt_pack1.blob_allocator = opt.workspace_allocator;
+
+        convert_packing(bottom_blob, bottom_blob_unpacked, 1, opt_pack1);
+    }
+
+    return Padding::forward(bottom_blob_unpacked, top_blob, opt);
+}
+
+int Padding_arm::forward_int8(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
+{
+    int w = bottom_blob.w;
+    int h = bottom_blob.h;
+    int channels = bottom_blob.c;
+    int dims = bottom_blob.dims;
+    size_t elemsize = bottom_blob.elemsize;
+    int elempack = bottom_blob.elempack;
+
+#if __ARM_NEON
+    if (elempack == 8)
+    {
+        if (dims == 1)
+        {
+            int outw = w * elempack + left + right;
+
+            int out_elempack = outw % 8 == 0 ? 8 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (left % 8 == 0 && out_elempack == 8)
+            {
+                // TODO
+            }
+        }
+
+        if (dims == 2)
+        {
+            int outw = w + left + right;
+            int outh = h * elempack + top + bottom;
+
+            int out_elempack = outh % 8 == 0 ? 8 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (top % 8 == 0 && out_elempack == 8)
+            {
+                // TODO
+            }
+        }
+
+        if (dims == 3)
+        {
+            int outw = w + left + right;
+            int outh = h + top + bottom;
+            int outc = channels * elempack + front + behind;
+
+            int out_elempack = outc % 8 == 0 ? 8 : 1;
+            size_t out_elemsize = elemsize / elempack * out_elempack;
+
+            top_blob.create(outw, outh, outc / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
+            if (top_blob.empty())
+                return -100;
+
+            if (front % 8 == 0 && out_elempack == 8 && !(outc != channels * elempack && type != 0))
+            {
+                int front_ = front / elempack;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < outc / out_elempack; q++)
+                {
+                    Mat borderm = top_blob.channel(q);
+
+                    // TODO perchannel
+                    //                     int8x8_t pad_value = per_channel_pad_data_size ? vld1_s8(per_channel_pad_data + q * 8) : vdup_n_s8((signed char)value);
+                    int8x8_t pad_value = vdup_n_s8((signed char)value);
+
+                    //Channel padding
+                    if ((q - front_) < 0 || (q - front_) >= channels)
+                    {
+                        borderm.fill<int8x8_t>(pad_value);
+                    }
+                    else
+                    {
+                        const Mat m = bottom_blob.channel(q - front_);
+                        if (type == 0)
+                            padding_constant_pack8_int8_neon(m, borderm, top, bottom, left, right, pad_value);
+                        if (type == 1)
+                            padding_replicate_pack8_int8_neon(m, borderm, top, bottom, left, right);
+                        if (type == 2)
+                            padding_reflect_pack8_int8_neon(m, borderm, top, bottom, left, right);
+                    }
+                }
+
+                return 0;
+            }
+        }
+    }
+#endif // __ARM_NEON
+
+    Mat bottom_blob_unpacked = bottom_blob;
+    if (elempack != 1)
+    {
+        Option opt_pack1 = opt;
+        opt_pack1.blob_allocator = opt.workspace_allocator;
+
+        convert_packing(bottom_blob, bottom_blob_unpacked, 1, opt_pack1);
+    }
+
+    return Padding::forward(bottom_blob_unpacked, top_blob, opt);
 }
 
 } // namespace ncnn

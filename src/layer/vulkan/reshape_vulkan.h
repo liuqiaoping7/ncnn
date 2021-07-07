@@ -29,8 +29,14 @@ public:
 
     using Reshape::forward;
     virtual int forward(const VkMat& bottom_blob, VkMat& top_blob, VkCompute& cmd, const Option& opt) const;
+    virtual int forward(const VkImageMat& bottom_blob, VkImageMat& top_blob, VkCompute& cmd, const Option& opt) const;
 
 public:
+    ncnn::Layer* permute_hwc;
+    ncnn::Layer* permute_hc;
+    ncnn::Layer* permute_hw;
+    ncnn::Layer* permute_chw;
+
     Pipeline* pipeline_reshape;
     Pipeline* pipeline_reshape_pack4;
     Pipeline* pipeline_reshape_pack1to4;
